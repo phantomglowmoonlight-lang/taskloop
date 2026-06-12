@@ -1,0 +1,47 @@
+{
+  "manifestVersion": 1,
+  "id": "taskloop",
+  "name": "TaskLoop",
+  "version": "0.2.0",
+  "description": "任務管線：Unreal Blueprint 式的 AI 任務編排系統。可定義多步驟任務序列、全局與任務專屬條件，AI 自動依序執行。支援桌面端（HanaAgent iframe）與獨立網頁版（含手機瀏覽器）。",
+  "minAppVersion": "0.159.0",
+  "trust": "full-access",
+  "ui": {
+    "hostCapabilities": [
+      "external.open",
+      "clipboard.writeText"
+    ]
+  },
+  "contributes": {
+    "page": {
+      "title": "TaskLoop",
+      "route": "/page",
+      "icon": "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\"><path d=\"M5 5h14v14H5z\"/><path d=\"M9 9h6M9 13h6\"/></svg>"
+    },
+    "widget": {
+      "title": "TaskLoop",
+      "route": "/widget",
+      "icon": "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\"><path d=\"M8 7l-4 5 4 5\"/><path d=\"M16 7l4 5-4 5\"/></svg>"
+    }
+  },
+  "dev": {
+    "scenarios": [
+      {
+        "id": "smoke-run-pipeline",
+        "steps": [
+          {
+            "invokeTool": {
+              "name": "taskloop_run_pipeline",
+              "input": {
+                "pipelineId": "__test__pipeline__id__"
+              }
+            }
+          },
+          {
+            "expectToolText": "已開始執行"
+          }
+        ]
+      }
+    ]
+  }
+}
