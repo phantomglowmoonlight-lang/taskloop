@@ -14,6 +14,14 @@ export default function registerPluginUiRoutes(app, ctx) {
   // ── UI 頁面 ──────────────────────────────────────────────────────────
   app.get("/page", (c) => c.html(renderShell(c, ctx, "page")));
   app.get("/widget", (c) => c.html(renderShell(c, ctx, "widget")));
+  app.get("/test", (c) => {
+    const testPath = path.join(ctx.pluginDir || "", "assets", "test.html");
+    if (fs.existsSync(testPath)) {
+      c.header("Content-Type", "text/html; charset=utf-8");
+      return c.body(fs.readFileSync(testPath));
+    }
+    return c.text("Not found", 404);
+  });
   app.get("/assets/*", (c) => serveAsset(c, ctx));
 
   // ── CORS 支援（獨立瀏覽器模式） ──────────────────────────────────────
