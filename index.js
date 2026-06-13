@@ -376,24 +376,150 @@ function checkTaskCondition(condition, pipeline, tasks, currentTask, currentIdx,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  核心執行引擎（支援按 Agent 分派任務）
+//  靜態驗證系統（Anti-Hallucination）
 // ═══════════════════════════════════════════════════════════════════════════
 
-function sendAndWait(ctx, sessionPath, prompt, pipelineId) {
+/** 中文數字映射 */
+const CN_DIGITS = ['〇', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
+
+/**
+ * 將 0–9999 的數字轉為 4 位中文數字編號
+ * 例：1 → 〇〇〇一, 42 → 〇〇四二, 9999 → 九九九九
+ */
+function toChineseId(num) {
+  const padded = String(num).padStart(4, '0');
+  return padded.split('').map(d => CN_DIGITS[parseInt(d, 10)]).join('');
+}
+
+/** 靜態驗證表：messageId → { hash, agentId, taskId, timestamp } */
+const verificationTable = new Map();
+let verificationCounter = 0;
+
+/** 註冊一條將發出的 prompt，回傳其 4 位中文編號 */
+function registerMessage(agentId, taskId) {
+  verificationCounter++;
+  const msgId = toChineseId(verificationCounter);
+  verificationTable.set(msgId, {
+    agentId,
+    taskId,
+    index: verificationCounter,
+    timestamp: nowISO(),
+  });
+  return msgId;
+}
+
+/**
+ * 操作指南 — 每次發送 prompt 給 AI 時帶上
+ * 確保 AI 知道自己在哪個系統中、須遵守的規則、以及編號系統
+ */
+const SYSTEM_OPERATION_GUIDE = `【系統操作指南 — 請嚴格遵守】
+
+你正在 TaskLoop 任務管線系統中執行任務。
+每個任務請求都攜帶一個唯一的 4 位中文編號（格式：〇〇〇一）。
+
+規則：
+1. 你的回應必須引用你收到的編號，格式：【回應編號：〇〇〇一】
+2. 編號是靜態查驗依據，一旦發現編號順序不符或遺漏，系統判定為幻覺
+3. 完整執行任務指示，不要跳過步驟
+4. 如果有任何不確定的情況，請在回應中明確說明
+5. 回應必須對應正確的編號，不可自行偽造或複製舊編號
+
+本次任務編號：`;
+
+/**
+ * 驗證 AI 回應中是否包含正確的編號
+ * 回傳 { valid, hallucination }
+ */
+function verifyResponse(msgId, response) {
+  // 檢查回應中是否包含正確的編號
+  const expectedPattern = msgId;
+  if (!response || !response.includes(expectedPattern)) {
+    return { valid: false, hallucination: true };
+  }
+  return { valid: true, hallucination: false };
+}
+
+/**
+ * 觸發 Session 壓縮（使用 Hanako 標準壓縮機制）
+ * 發送壓縮事件至 bus，由 Hana 系統處理
+ */
+function triggerContextCompression(ctx, sessionPath, agentId, reason) {
+  console.warn(`[TaskLoop] 🚨 偵測到幻覺（Agent: ${agentId}），原因：${reason}，開始壓縮上下文`);
+  try {
+    // 透過 bus 發送壓縮事件
+    ctx.bus.emit("taskloop:compression-requested", {
+      agentId,
+      sessionPath,
+      reason,
+      timestamp: nowISO(),
+    }).catch(() => {});
+
+    // 也直接發送 session 壓縮指令
+    sendSessionMessage(ctx, sessionPath, {
+      content: "【系統】偵測到幻覺，正在壓縮上下文以重置注意力。請忽略之前的指示，從最新訊息開始。",
+    }).catch(() => {});
+  } catch (err) {
+    console.error("[TaskLoop] 壓縮上下文失敗:", err);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  核心執行引擎（支援按 Agent 分派任務 + 靜態驗證）
+// ═══════════════════════════════════════════════════════════════════════════
+
+const MAX_CONSECUTIVE_HALLUCINATIONS = 3;
+
+function sendAndWait(ctx, sessionPath, prompt, pipelineId, msgId, agentId) {
   return new Promise((resolve, reject) => {
     const timeoutMs = 300000;
     let settled = false;
-    const timer = setTimeout(() => { if (!settled) { settled = true; unsub(); reject(new Error("等待 Agent 回應逾時（5 分鐘）")); } }, timeoutMs);
+
+    // 包裝 prompt：帶入操作指南 + 編號
+    const wrappedPrompt = `${SYSTEM_OPERATION_GUIDE}【${msgId}】\n\n${prompt}`;
+
+    const timer = setTimeout(() => {
+      if (!settled) { settled = true; unsub(); reject(new Error(`等待 Agent 回應逾時（5 分鐘）— 編號 ${msgId}`)); }
+    }, timeoutMs);
+
     const unsub = subscribeSessionEvents(ctx, sessionPath, (event) => {
       if (settled) return;
       const et = event.type || "";
       if (et === "session:conversation:response" || et === "session:message:response" || et === "session:response" || et.endsWith(":response") || (et.includes("completed") && !et.includes("task") && !et.includes("pipeline"))) {
+        const responseText = event.text || event.content || event.response || (typeof event.message === "string" ? event.message : "") || JSON.stringify(event);
+
+        // ── 靜態驗證 ──
+        const verdict = verifyResponse(msgId, responseText);
+        if (verdict.hallucination) {
+          console.warn(`[TaskLoop] ⚠ 幻覺偵測（${agentId}）：回應缺少編號 ${msgId}`);
+          triggerContextCompression(ctx, sessionPath, agentId, `回應缺少編號 ${msgId}`);
+          // 不 reject，仍讓上層處理
+        }
+
         settled = true; clearTimeout(timer); unsub();
-        resolve(event.text || event.content || event.response || (typeof event.message === "string" ? event.message : "") || JSON.stringify(event));
+        resolve({
+          text: responseText,
+          hallucination: verdict.hallucination,
+          msgId,
+        });
       }
     });
-    sendSessionMessage(ctx, sessionPath, { content: prompt }).catch((err) => { if (!settled) { settled = true; clearTimeout(timer); unsub(); reject(err); } });
+
+    sendSessionMessage(ctx, sessionPath, { content: wrappedPrompt }).catch((err) => {
+      if (!settled) { settled = true; clearTimeout(timer); unsub(); reject(err); }
+    });
   });
+}
+
+/**
+ * 使用 Hanako 標準方式壓縮整個 Agent Session（透過 bus 事件觸發）
+ * 由外部監聽器實際執行壓縮
+ */
+function compressAgentSession(ctx, agentId, sessionPath) {
+  ctx.bus.emit("taskloop:session-compress", {
+    agentId,
+    sessionPath,
+    timestamp: nowISO(),
+  }).catch(() => {});
 }
 
 function waitForResume(pipelineId) {
@@ -459,11 +585,17 @@ async function executePipeline(pipeline, ctx) {
           `[${targetAgentId}] 開始執行任務：${task.name}`);
 
         try {
-          const response = await sendAndWait(ctx, sessionPath, task.prompt, pipeline.id);
+          // ── 註冊靜態驗證編號 ──
+          const msgId = registerMessage(targetAgentId, task.id);
+
+          const response = await sendAndWait(ctx, sessionPath, task.prompt, pipeline.id, msgId, targetAgentId);
           if (pipeline.status === "terminated") break;
 
+          const responseText = typeof response === 'object' ? response.text : response;
+          const hasHallucination = typeof response === 'object' ? response.hallucination : false;
+
           task.status = "completed";
-          task.result = response;
+          task.result = responseText;
           task.completedAt = nowISO();
           task.repeatCount = runCount + 1;
           pipelineStore.dirty = true; flushPipelines();
@@ -474,8 +606,9 @@ async function executePipeline(pipeline, ctx) {
             flushSessions();
           }
 
+          const completionNote = hasHallucination ? ' ⚠（含幻覺警報）' : '';
           broadcastEvent(ctx, pipeline.id, "task_completed", task.id, i,
-            `[${targetAgentId}] 任務完成：${task.name}（第 ${runCount + 1}/${maxRepeats} 次）`);
+            `[${targetAgentId}] 任務完成：${task.name}（第 ${runCount + 1}/${maxRepeats} 次）${completionNote}`);
 
           const successCond = task.conditions.find(c => c.type === "on_success");
           if (successCond) {
