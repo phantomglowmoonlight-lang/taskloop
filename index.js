@@ -199,6 +199,8 @@ function createPipeline(data) {
     name: data.name || "未命名管線",
     description: data.description || "",
     agentId: data.agentId || "coder",
+    prompt: data.prompt || "",
+    frameworkIds: data.frameworkIds || [],
     createdAt: ts,
     updatedAt: ts,
     tasks: (data.tasks || []).map((t, i) => ({
@@ -237,12 +239,17 @@ function updatePipeline(id, data) {
   const pipeline = getPipeline(id);
   if (!pipeline) return null;
 
-  if (data.name !== undefined) pipeline.name = data.name;
-  if (data.description !== undefined) pipeline.description = data.description;
-  if (data.agentId !== undefined) pipeline.agentId = data.agentId;
+  // 深拷貝避免就地突變
+  const clone = JSON.parse(JSON.stringify(pipeline));
+
+  if (data.name !== undefined) clone.name = data.name;
+  if (data.description !== undefined) clone.description = data.description;
+  if (data.agentId !== undefined) clone.agentId = data.agentId;
+  if (data.prompt !== undefined) clone.prompt = data.prompt;
+  if (data.frameworkIds !== undefined) clone.frameworkIds = data.frameworkIds;
 
   if (data.tasks !== undefined) {
-    pipeline.tasks = data.tasks.map((t, i) => ({
+    clone.tasks = data.tasks.map((t, i) => ({
       id: t.id || uid(),
       orderIndex: i,
       name: t.name || `任務 ${i + 1}`,
@@ -261,13 +268,17 @@ function updatePipeline(id, data) {
   }
 
   if (data.globalConditions !== undefined) {
-    pipeline.globalConditions = data.globalConditions;
+    clone.globalConditions = data.globalConditions;
   }
 
-  pipeline.updatedAt = nowISO();
+  clone.updatedAt = nowISO();
+
+  // 替換原 pipelineStore 中的物件
+  const idx = pipelineStore.pipelines.findIndex(p => p.id === id);
+  if (idx !== -1) pipelineStore.pipelines[idx] = clone;
   pipelineStore.dirty = true;
   flushPipelines();
-  return pipeline;
+  return clone;
 }
 
 function deletePipeline(id) {
@@ -337,8 +348,8 @@ function checkGlobalConditions(pipeline, ctx) {
         break;
       }
       case "max_failures": {
-        normalizeConditionConfig(cond.config);
-        const maxFail = Number(cond.config?.count) || 0;
+        const normalizedConfig = normalizeConditionConfig(cond.config);
+        const maxFail = Number(normalizedConfig?.count) || 0;
         if (failed >= maxFail && maxFail > 0) {
           broadcastEvent(ctx, pipeline.id, "condition_triggered", null, null,
             `全局條件 max_failures 觸發：已失敗 ${failed}/${maxFail} 次`);
@@ -584,7 +595,7 @@ function sendAndWait(ctx, sessionPath, prompt, pipelineId, msgId, agentId, signa
     const unsub = subscribeSessionEvents(ctx, sessionPath, (event) => {
       if (settled) return;
       const et = event.type || "";
-      if (et === "session:conversation:response" || et === "session:message:response" || et === "session:response" || et.endsWith(":response") || (et.includes("completed") && !et.includes("task") && !et.includes("pipeline"))) {
+      if (et === "session:conversation:response" || et === "session:message:response" || et === "session:response" || et.endsWith(":response")) {
         const responseText = event.text || event.content || event.response || (typeof event.message === "string" ? event.message : "") || JSON.stringify(event);
 
         const verdict = verifyResponse(msgId, responseText);
@@ -663,14 +674,13 @@ function hasCycleDependency(tasks) {
 }
 
 /**
- * 統一條件配置 key
- * 確保 config 中的 key 與後端一致
+ * 統一條件配置 key（回傳新物件，不突變原始 config）
  */
 function normalizeConditionConfig(config) {
   if (!config) return config;
   // 支援舊的 maxFailures 向後相容
   if (config.maxFailures !== undefined && config.count === undefined) {
-    config.count = config.maxFailures;
+    return { ...config, count: config.maxFailures };
   }
   return config;
 }
@@ -838,7 +848,11 @@ async function executePipeline(pipeline, ctx) {
           runCount = maxRepeats;
         }
       }
-      if (checkGlobalConditions(pipeline, ctx)) break;
+      if (checkGlobalConditions(pipeline, ctx)) {
+        // pause 動作：讓 loop 回到開頭的暫停檢查，而非直接中斷
+        if (pipeline.status === "paused") continue;
+        break;
+      }
       i++;
       if (pipeline.currentTaskIndex >= 0 && pipeline.currentTaskIndex !== i && pipeline.currentTaskIndex < sortedTasks.length) {
         i = pipeline.currentTaskIndex;
@@ -859,7 +873,10 @@ async function executePipeline(pipeline, ctx) {
     pipelineStore.dirty = true; flushPipelines();
     broadcastEvent(ctx, pipeline.id, "pipeline_terminated", null, null, err.message);
   } finally {
-    executions.delete(pipeline.id);
+    // 暫停狀態保留執行上下文，讓 resume 能恢復
+    if (pipeline.status !== "paused") {
+      executions.delete(pipeline.id);
+    }
     flushPipelines();
   }
 }

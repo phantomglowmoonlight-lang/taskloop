@@ -220,31 +220,35 @@ export default function BlueprintEditor({
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
+  const edgesRef = useRef(edges);
+  edgesRef.current = edges;
+  // handleEdgesChange 需要透過 ref 存取當前 edges，避免 stale closure
+  const handleEdgesChange = useCallback((changes: any[]) => {
+    const currentEdges = edgesRef.current;
+    for (const change of changes) {
+      if (change.type === 'remove') {
+        const removedEdge = currentEdges.find((e: any) => e.id === change.id);
+        if (removedEdge) {
+          const sourceId = removedEdge.source;
+          const targetId = removedEdge.target;
+          if (sourceId && targetId && sourceId !== 'start' && targetId !== 'end') {
+            onTasksChange(tasks.map(t =>
+              t.id === targetId
+                ? { ...t, dependsOn: (t.dependsOn || []).filter(d => d !== sourceId) }
+                : t,
+            ));
+          }
+        }
+      }
+    }
+    onEdgesChange(changes);
+  }, [tasks, onTasksChange, onEdgesChange]);
 
   // 同步外部變更
   useMemo(() => {
     setNodes(initialNodes);
     setEdges(initialEdges);
   }, [initialNodes, initialEdges]);
-
-  // 邊線刪除處理：從目標任務的 dependsOn 中移除被刪除的來源
-  const handleEdgesChange = useCallback((changes: any[]) => {
-    for (const change of changes) {
-      if (change.type === 'remove') {
-        const removedEdge = change;
-        const sourceId = typeof removedEdge.source === 'string' ? removedEdge.source : removedEdge.removed?.source;
-        const targetId = typeof removedEdge.target === 'string' ? removedEdge.target : removedEdge.removed?.target;
-        if (sourceId && targetId && sourceId !== 'start' && targetId !== 'end') {
-          onTasksChange(tasks.map(t =>
-            t.id === targetId
-              ? { ...t, dependsOn: (t.dependsOn || []).filter(d => d !== sourceId) }
-              : t,
-          ));
-        }
-      }
-    }
-    onEdgesChange(changes);
-  }, [tasks, onTasksChange, onEdgesChange]);
 
   // 連線處理：更新目標任務的 dependsOn
   const onConnect: OnConnect = useCallback((connection: Connection) => {

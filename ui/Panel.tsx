@@ -248,6 +248,9 @@ function Panel() {
   const [formData, setFormData] = useState<PipelineFormData>({
     name: '',
     description: '',
+    agentId: undefined,
+    prompt: '',
+    frameworkIds: [],
     tasks: [],
     globalConditions: [],
   });
@@ -572,12 +575,13 @@ function Panel() {
       window.__taskloop_lastSavedId = saved.id;
       setIsNewPipeline(false);
       // 同步 formData 以反映已儲存狀態
-      setFormData({
+      setFormData((prev) => ({
+        ...prev,
         name: saved.name,
         description: saved.description,
         tasks: saved.tasks.map((t) => ({ ...t, conditions: t.conditions.map((c) => ({ ...c })) })),
         globalConditions: saved.globalConditions.map((g) => ({ ...g })),
-      });
+      }));
       setSaveStatus('success');
       setTimeout(() => setSaveStatus('idle'), 2000);
     } catch (err) {
