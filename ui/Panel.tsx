@@ -27,6 +27,7 @@ import type {
   TaskConditionType,
   ConditionAction,
   PipelineFormData,
+  SessionMessage,
 } from './types';
 
 // ─── 常數定義 ─────────────────────────────────────────────
@@ -252,6 +253,13 @@ function Panel() {
   const [execError, setExecError] = useState<string | null>(null);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
 
+  // Session 檢視器狀態
+  const [showSessions, setShowSessions] = useState(false);
+  const [sessions, setSessions] = useState<{agentId: string; lastActivity: string | null; createdAt: string}[]>([]);
+  const [sessionMessages, setSessionMessages] = useState<Record<string, SessionMessage[]>>({});
+  const [expandedSessionAgent, setExpandedSessionAgent] = useState<string | null>(null);
+  const [loadingSessions, setLoadingSessions] = useState(false);
+
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // 選取的管線物件
@@ -328,6 +336,7 @@ function Panel() {
     setFormData({
       name: pipeline.name,
       description: pipeline.description,
+      agentId: pipeline.agentId || 'coder',
       tasks: pipeline.tasks.map((t) => ({ ...t, conditions: t.conditions.map((c) => ({ ...c })) })),
       globalConditions: pipeline.globalConditions.map((g) => ({ ...g })),
     });
@@ -350,6 +359,7 @@ function Panel() {
     setFormData({
       name: '',
       description: '',
+      agentId: 'coder',
       tasks: [],
       globalConditions: [],
     });
@@ -522,6 +532,7 @@ function Panel() {
       const data: PipelineFormData = {
         name: formData.name || '未命名管線',
         description: formData.description,
+        agentId: formData.agentId,
         tasks: formData.tasks,
         globalConditions: formData.globalConditions,
       };
@@ -625,6 +636,47 @@ function Panel() {
       }
     } catch (err) {
       setExecError(err instanceof Error ? err.message : '刪除失敗');
+    }
+  }
+
+  // ─── Session 檢視器 ───────────────────────────────────
+
+  async function toggleSessions() {
+    if (showSessions) {
+      setShowSessions(false);
+      return;
+    }
+    setShowSessions(true);
+    setLoadingSessions(true);
+    try {
+      const res = await fetch(apiUrl('/sessions'));
+      const json = await res.json();
+      if (json.ok && json.sessions) {
+        setSessions(json.sessions);
+      }
+    } catch (err) {
+      console.error('Failed to load sessions:', err);
+    } finally {
+      setLoadingSessions(false);
+    }
+  }
+
+  async function loadSessionMessages(agentId: string) {
+    if (expandedSessionAgent === agentId) {
+      setExpandedSessionAgent(null);
+      return;
+    }
+    setExpandedSessionAgent(agentId);
+    if (!sessionMessages[agentId]) {
+      try {
+        const res = await fetch(apiUrl(`/sessions/${encodeURIComponent(agentId)}`));
+        const json = await res.json();
+        if (json.ok && json.messages) {
+          setSessionMessages((prev) => ({ ...prev, [agentId]: json.messages }));
+        }
+      } catch (err) {
+        console.error(`Failed to load messages for ${agentId}:`, err);
+      }
     }
   }
 
@@ -1124,6 +1176,90 @@ function Panel() {
     );
   }
 
+  // ─── 渲染：Session 檢視器 ──────────────────────────────
+
+  function renderSessionViewer() {
+    if (loadingSessions) {
+      return (
+        <div className="tl-editor-content">
+          <p style={{ padding: '2rem', color: 'var(--hana-plugin-text-muted, #888)' }}>載入 Session 列表中...</p>
+        </div>
+      );
+    }
+
+    return (
+      <div className="tl-editor-content">
+        <h2 style={{ fontWeight: 600, fontSize: 16, marginBottom: 16 }}>Agent Session</h2>
+        <p style={{ marginBottom: 16, color: 'var(--hana-plugin-text-muted, #888)', fontSize: 13 }}>
+          每個 Agent 有一個專屬 Session。點擊展開查看對話記錄。
+        </p>
+        {sessions.length === 0 ? (
+          <EmptyState
+            title="尚無 Session"
+            description="執行管線時會自動為各 Agent 建立 Session。"
+          />
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {sessions.map((s) => (
+              <div
+                key={s.agentId}
+                className={`tl-section ${expandedSessionAgent === s.agentId ? '' : ''}`}
+              >
+                <button
+                  className="tl-section-toggle"
+                  onClick={() => loadSessionMessages(s.agentId)}
+                >
+                  <span className={`tl-chevron ${expandedSessionAgent === s.agentId ? 'tl-chevron--open' : ''}`}>▶</span>
+                  <strong>{s.agentId}</strong>
+                  {s.lastActivity && (
+                    <span style={{ marginLeft: 12, fontSize: 12, color: 'var(--hana-plugin-text-muted, #888)' }}>
+                      最後活動: {new Date(s.lastActivity).toLocaleString()}
+                    </span>
+                  )}
+                </button>
+                {expandedSessionAgent === s.agentId && (
+                  <div className="tl-section-content" style={{ maxHeight: 500, overflowY: 'auto' }}>
+                    {sessionMessages[s.agentId]?.length > 0 ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {sessionMessages[s.agentId].map((msg, i) => (
+                          <div
+                            key={i}
+                            style={{
+                              padding: '8px 12px',
+                              borderRadius: 8,
+                              background: msg.role === 'user'
+                                ? 'var(--hana-plugin-accent-light, rgba(83, 125, 150, 0.06))'
+                                : 'var(--hana-plugin-bg, #f8f5ed)',
+                              borderLeft: msg.role === 'assistant'
+                                ? '3px solid var(--hana-plugin-accent, #537d96)'
+                                : '3px solid transparent',
+                            }}
+                          >
+                            <div style={{ fontSize: 11, color: 'var(--hana-plugin-text-muted, #888)', marginBottom: 4 }}>
+                              {msg.role === 'user' ? '👤 User' : msg.role === 'assistant' ? '🤖 AI' : '⚙ System'}
+                              {msg.timestamp && ` · ${new Date(msg.timestamp).toLocaleString()}`}
+                            </div>
+                            <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                              {msg.content.length > 500 ? msg.content.slice(0, 500) + '...' : msg.content}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p style={{ color: 'var(--hana-plugin-text-muted, #888)', fontSize: 13, fontStyle: 'italic' }}>
+                        暂無訊息記錄
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   // ─── 渲染：管線編輯器 ──────────────────────────────────
 
   function renderPipelineEditor() {
@@ -1145,6 +1281,17 @@ function Panel() {
               updateDescription(e.currentTarget.value)
             }
             placeholder="簡短描述此管線的用途"
+          />
+          <label className="tl-task-card-label" style={{marginTop:4}}>主負責 Agent</label>
+          <Select
+            value={formData.agentId}
+            onChange={(v) => setFormData((prev) => ({ ...prev, agentId: v }))}
+            options={[
+              { value: 'coder', label: '1號程序員 (coder)' },
+              { value: 'hanako', label: '木頭助理 (hanako)' },
+              { value: 'hi', label: '2號程序員 (hi)' },
+              { value: 'pm', label: '產品經理 (pm)' },
+            ]}
           />
         </div>
 
@@ -1239,6 +1386,12 @@ function Panel() {
                 { value: 'custom', label: '自訂' },
               ]}
             />
+            <Button
+              variant="ghost"
+              onClick={toggleSessions}
+            >
+              {showSessions ? '✕ 關閉' : '📋 Sessions'}
+            </Button>
           </div>
           <div className="tl-toolbar-actions">
             <Button
@@ -1282,7 +1435,9 @@ function Panel() {
         <div className="tl-main">
           {renderSidebar()}
           <main className="tl-editor">
-            {selectedPipelineId || isNewPipeline ? (
+            {showSessions ? (
+              renderSessionViewer()
+            ) : selectedPipelineId || isNewPipeline ? (
               renderPipelineEditor()
             ) : (
               <EmptyState

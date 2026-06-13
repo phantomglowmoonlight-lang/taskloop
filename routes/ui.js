@@ -265,6 +265,44 @@ export default function registerPluginUiRoutes(app, ctx) {
       return c.json({ ok: false, error: err.message }, 500);
     }
   });
+
+  // ── Session API ────────────────────────────────────────────────────────
+
+  app.get("/sessions", async (c) => {
+    try {
+      setCorsHeaders(c);
+      const result = await ctx.bus.request("taskloop:list-sessions", {});
+      return c.json(result && result.ok ? { ok: true, sessions: result.sessions } : { ok: false, sessions: [] });
+    } catch (err) {
+      setCorsHeaders(c);
+      return c.json({ ok: false, sessions: [], error: err.message });
+    }
+  });
+
+  app.get("/sessions/:agentId", async (c) => {
+    try {
+      setCorsHeaders(c);
+      const agentId = c.req.param("agentId");
+      const result = await ctx.bus.request("taskloop:read-session", { agentId, limit: 100 });
+      return c.json(result && result.ok ? { ok: true, ...result } : { ok: false, agentId, messages: [] });
+    } catch (err) {
+      setCorsHeaders(c);
+      return c.json({ ok: false, messages: [], error: err.message });
+    }
+  });
+
+  app.post("/sessions/ensure", async (c) => {
+    try {
+      setCorsHeaders(c);
+      const body = await c.req.json();
+      if (!body || !body.agentId) return c.json({ ok: false, error: "缺少 agentId" }, 400);
+      const result = await ctx.bus.request("taskloop:ensure-session", { agentId: body.agentId });
+      return c.json(result && result.ok ? { ok: true, session: result.session } : { ok: false, error: result?.error || "建立失敗" }, 500);
+    } catch (err) {
+      setCorsHeaders(c);
+      return c.json({ ok: false, error: err.message }, 500);
+    }
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -3,8 +3,9 @@
  *
  * 提供：
  * 1. 管線資料的持久化儲存（CRUD）
- * 2. EventBus 處理器（taskloop:*）
- * 3. 管線執行引擎（發送 prompt 給 Agent 並等待回應）
+ * 2. Agent Session 管理（每個 Agent 一個專屬 Session）
+ * 3. EventBus 處理器（taskloop:*）
+ * 4. 管線執行引擎（按 Agent 分派任務，發送 prompt 並等待回應）
  */
 import {
   definePlugin,
@@ -19,58 +20,185 @@ import path from "node:path";
 import crypto from "node:crypto";
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  儲存層 — pipelines.json 的讀寫
+//  管線儲存層 — pipelines.json
 // ═══════════════════════════════════════════════════════════════════════════
 
-const store = {
+const pipelineStore = {
   pipelines: [],
   filePath: null,
   dirty: false,
 };
 
-/** 從磁碟載入管線資料 */
-function loadStore(filePath) {
-  store.filePath = filePath;
+function loadPipelines(filePath) {
+  pipelineStore.filePath = filePath;
   try {
-    const raw = fs.readFileSync(filePath, "utf-8");
-    store.pipelines = JSON.parse(raw);
+    pipelineStore.pipelines = JSON.parse(fs.readFileSync(filePath, "utf-8"));
   } catch {
-    store.pipelines = [];
+    pipelineStore.pipelines = [];
   }
 }
 
-/** 若資料有變更則寫回磁碟 */
-function flushStore() {
-  if (!store.dirty) return;
+function flushPipelines() {
+  if (!pipelineStore.dirty) return;
   try {
-    fs.writeFileSync(store.filePath, JSON.stringify(store.pipelines, null, 2), "utf-8");
-    store.dirty = false;
+    fs.writeFileSync(pipelineStore.filePath, JSON.stringify(pipelineStore.pipelines, null, 2), "utf-8");
+    pipelineStore.dirty = false;
   } catch (err) {
     console.error("[TaskLoop] 無法寫入 pipelines.json:", err);
   }
 }
 
-/** 產生 UUID */
-function uid() {
-  return crypto.randomUUID();
+// ═══════════════════════════════════════════════════════════════════════════
+//  Agent Session 儲存層 — sessions.json
+//  Map<agentId, { agentId, sessionPath, createdAt, lastActivity }>
+// ═══════════════════════════════════════════════════════════════════════════
+
+const sessionsStore = {
+  sessions: {},      // agentId → sessionInfo
+  filePath: null,
+};
+
+function loadSessions(filePath) {
+  sessionsStore.filePath = filePath;
+  try {
+    sessionsStore.sessions = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+  } catch {
+    sessionsStore.sessions = {};
+  }
 }
 
-/** 取得當前 ISO 時間字串 */
-function nowISO() {
-  return new Date().toISOString();
+function flushSessions() {
+  try {
+    const dir = path.dirname(sessionsStore.filePath);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(sessionsStore.filePath, JSON.stringify(sessionsStore.sessions, null, 2), "utf-8");
+  } catch (err) {
+    console.error("[TaskLoop] 無法寫入 sessions.json:", err);
+  }
 }
+
+/**
+ * 取得或建立某個 Agent 的專屬 Session
+ * 每個 Agent 只會建立一次，之後重複使用
+ */
+async function getAgentSession(ctx, agentId) {
+  // 記憶體快取優先
+  const existing = sessionsStore.sessions[agentId];
+  if (existing && existing.sessionPath) {
+    return existing;
+  }
+
+  // 建立新 session
+  const session = await createSession(ctx, {
+    agentId,
+    kind: "taskloop",
+    visibility: "plugin_private",
+    cwd: ctx.dataDir,
+  });
+
+  const sessionPath = session.sessionPath || session.path || session.id;
+  if (!sessionPath) {
+    throw new Error(`建立 Agent "${agentId}" 的 session 成功但無法取得 path`);
+  }
+
+  const info = {
+    agentId,
+    sessionPath,
+    createdAt: new Date().toISOString(),
+    lastActivity: null,
+  };
+  sessionsStore.sessions[agentId] = info;
+  flushSessions();
+  return info;
+}
+
+/**
+ * 讀取 Agent Session 的最近訊息
+ * 回傳 { agentId, messages: [{ role, content, timestamp }] }
+ */
+function readSessionMessages(agentId, limit = 50) {
+  const info = sessionsStore.sessions[agentId];
+  if (!info || !info.sessionPath) {
+    return { agentId, messages: [] };
+  }
+
+  const filePath = info.sessionPath;
+  if (!fs.existsSync(filePath)) {
+    return { agentId, messages: [] };
+  }
+
+  try {
+    const content = fs.readFileSync(filePath, "utf-8");
+    const lines = content.trim().split("\n").filter(Boolean);
+    // 取最後 N 行
+    const recent = lines.slice(-limit);
+
+    const messages = [];
+    for (const line of recent) {
+      try {
+        const evt = JSON.parse(line);
+        const evtType = evt.type || "";
+
+        // 過濾出 user message 和 assistant response
+        if (evtType === "session:conversation:user_message" || evtType.endsWith(":user_message")) {
+          messages.push({
+            role: "user",
+            content: evt.text || evt.content || evt.message || "",
+            timestamp: evt.timestamp || evt.createdAt || "",
+          });
+        } else if (evtType === "session:conversation:response" || evtType.endsWith(":response")) {
+          messages.push({
+            role: "assistant",
+            content: evt.text || evt.content || evt.response || evt.message || "",
+            timestamp: evt.timestamp || evt.createdAt || "",
+          });
+        } else if (evtType === "session:created" || evtType === "session:conversation:started") {
+          messages.push({
+            role: "system",
+            content: `Session 已建立`,
+            timestamp: evt.timestamp || evt.createdAt || "",
+          });
+        }
+      } catch {
+        // 跳過無法解析的行
+      }
+    }
+
+    return { agentId, messages };
+  } catch (err) {
+    console.error(`[TaskLoop] 無法讀取 session 檔案 ${filePath}:`, err);
+    return { agentId, messages: [], error: err.message };
+  }
+}
+
+/** 列舉所有 Agent Sessions */
+function listAgentSessions() {
+  return Object.entries(sessionsStore.sessions).map(([agentId, info]) => ({
+    agentId,
+    sessionPath: info.sessionPath,
+    lastActivity: info.lastActivity,
+    createdAt: info.createdAt,
+  }));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  共用工具函數
+// ═══════════════════════════════════════════════════════════════════════════
+
+function uid() { return crypto.randomUUID(); }
+function nowISO() { return new Date().toISOString(); }
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  管線 CRUD
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** 建立新管線 */
 function createPipeline(data) {
   const ts = nowISO();
   const pipeline = {
     id: uid(),
     name: data.name || "未命名管線",
     description: data.description || "",
+    agentId: data.agentId || "coder",
     createdAt: ts,
     updatedAt: ts,
     tasks: (data.tasks || []).map((t, i) => ({
@@ -78,6 +206,7 @@ function createPipeline(data) {
       orderIndex: i,
       name: t.name || `任務 ${i + 1}`,
       prompt: t.prompt || "",
+      agentId: t.agentId || undefined,
       repeat: t.repeat ?? 1,
       repeatCount: 0,
       conditions: t.conditions || [],
@@ -92,24 +221,23 @@ function createPipeline(data) {
     startedAt: null,
     completedAt: null,
   };
-  store.pipelines.push(pipeline);
-  store.dirty = true;
-  flushStore();
+  pipelineStore.pipelines.push(pipeline);
+  pipelineStore.dirty = true;
+  flushPipelines();
   return pipeline;
 }
 
-/** 依 ID 取得管線 */
 function getPipeline(id) {
-  return store.pipelines.find((p) => p.id === id) || null;
+  return pipelineStore.pipelines.find((p) => p.id === id) || null;
 }
 
-/** 更新管線欄位 */
 function updatePipeline(id, data) {
   const pipeline = getPipeline(id);
   if (!pipeline) return null;
 
   if (data.name !== undefined) pipeline.name = data.name;
   if (data.description !== undefined) pipeline.description = data.description;
+  if (data.agentId !== undefined) pipeline.agentId = data.agentId;
 
   if (data.tasks !== undefined) {
     pipeline.tasks = data.tasks.map((t, i) => ({
@@ -117,6 +245,7 @@ function updatePipeline(id, data) {
       orderIndex: i,
       name: t.name || `任務 ${i + 1}`,
       prompt: t.prompt || "",
+      agentId: t.agentId || undefined,
       repeat: t.repeat ?? 1,
       repeatCount: t.repeatCount ?? 0,
       conditions: t.conditions || [],
@@ -132,75 +261,47 @@ function updatePipeline(id, data) {
   }
 
   pipeline.updatedAt = nowISO();
-  store.dirty = true;
-  flushStore();
+  pipelineStore.dirty = true;
+  flushPipelines();
   return pipeline;
 }
 
-/** 刪除管線 */
 function deletePipeline(id) {
-  const idx = store.pipelines.findIndex((p) => p.id === id);
+  const idx = pipelineStore.pipelines.findIndex((p) => p.id === id);
   if (idx === -1) return false;
-  store.pipelines.splice(idx, 1);
-  store.dirty = true;
-  flushStore();
+  pipelineStore.pipelines.splice(idx, 1);
+  pipelineStore.dirty = true;
+  flushPipelines();
   return true;
 }
 
-/** 列出所有管線 */
 function listPipelines() {
-  return store.pipelines;
+  return pipelineStore.pipelines;
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  Session 快取（從 route 呼叫時沒有 toolCtx.sessionPath，需自動建立）
-// ═══════════════════════════════════════════════════════════════════════════
-
-/** 依 agentId 快取已建立的 sessionPath，避免每次執行都新建 session */
-const _sessionCache = new Map();
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  執行引擎狀態管理
 // ═══════════════════════════════════════════════════════════════════════════
 
-/**
- * 活躍執行追蹤
- * Map<pipelineId, ExecutionContext>
- *
- * ExecutionContext 欄位：
- *   pipeline   - 管線物件（引用）
- *   sessionPath - 執行所在的 session 路徑
- *   status     - 'running' | 'paused' | 'terminated'
- *   abortCtrl  - AbortController（用於中斷等待）
- *   pauseResolve - Promise resolve，用於 pause 恢復
- */
 const executions = new Map();
 
-/** 透過 EventBus 廣播執行事件 */
 function broadcastEvent(ctx, pipelineId, type, taskId, taskIndex, message) {
-  const event = {
-    type: `taskloop:execution-event`,
-    payload: {
-      type,
-      pipelineId,
-      taskId: taskId || null,
-      taskIndex: taskIndex ?? null,
-      message: message || "",
-      timestamp: nowISO(),
-    },
-  };
-  // 廣播給所有訂閱者
-  ctx.bus.emit(event.type, event.payload).catch(() => {});
+  ctx.bus.emit("taskloop:execution-event", {
+    type,
+    pipelineId,
+    taskId: taskId || null,
+    taskIndex: taskIndex ?? null,
+    message: message || "",
+    timestamp: nowISO(),
+  }).catch(() => {});
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  條件判斷邏輯
+//  條件判斷邏輯（與原版相同，略）
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** 計算管線中已完成與失敗的任務數量 */
 function countTaskStatuses(pipeline) {
-  let completed = 0;
-  let failed = 0;
+  let completed = 0, failed = 0;
   for (const t of pipeline.tasks) {
     if (t.status === "completed") completed++;
     if (t.status === "failed") failed++;
@@ -208,13 +309,8 @@ function countTaskStatuses(pipeline) {
   return { completed, failed };
 }
 
-/**
- * 檢查並執行全局條件
- * 回傳 true 表示有條件觸發了跳轉/終止等動作
- */
 function checkGlobalConditions(pipeline, ctx) {
   const { completed, failed } = countTaskStatuses(pipeline);
-
   for (const cond of pipeline.globalConditions) {
     switch (cond.type) {
       case "after_tasks_count": {
@@ -229,10 +325,9 @@ function checkGlobalConditions(pipeline, ctx) {
       case "after_time": {
         if (!pipeline.startedAt) break;
         const minutes = Number(cond.config?.minutes) || 0;
-        const elapsed = Date.now() - new Date(pipeline.startedAt).getTime();
-        if (elapsed >= minutes * 60000) {
+        if (Date.now() - new Date(pipeline.startedAt).getTime() >= minutes * 60000) {
           broadcastEvent(ctx, pipeline.id, "condition_triggered", null, null,
-            `全局條件 after_time 觸發：已執行 ${Math.round(elapsed / 60000)}/${minutes} 分鐘`);
+            `全局條件 after_time 觸發：已執行超過 ${minutes} 分鐘`);
           return applyGlobalConditionAction(cond, pipeline, ctx);
         }
         break;
@@ -246,347 +341,190 @@ function checkGlobalConditions(pipeline, ctx) {
         }
         break;
       }
-      case "custom":
-        // 自訂條件：由前端或外部判斷，此處不處理
-        break;
+      case "custom": break;
     }
   }
   return false;
 }
 
-/** 執行全局條件動作 */
 function applyGlobalConditionAction(cond, pipeline, ctx) {
   switch (cond.action) {
-    case "pause":
-      pipeline.status = "paused";
-      store.dirty = true;
-      flushStore();
-      return true;
+    case "pause": pipeline.status = "paused"; pipelineStore.dirty = true; flushPipelines(); return true;
     case "terminate":
-      pipeline.status = "terminated";
-      pipeline.completedAt = nowISO();
-      // 將執行中的任務設為 failed
-      for (const t of pipeline.tasks) {
-        if (t.status === "running") {
-          t.status = "failed";
-          t.completedAt = nowISO();
-        }
-      }
-      store.dirty = true;
-      flushStore();
-      broadcastEvent(ctx, pipeline.id, "pipeline_terminated");
-      return true;
+      pipeline.status = "terminated"; pipeline.completedAt = nowISO();
+      for (const t of pipeline.tasks) { if (t.status === "running") { t.status = "failed"; t.completedAt = nowISO(); } }
+      pipelineStore.dirty = true; flushPipelines(); broadcastEvent(ctx, pipeline.id, "pipeline_terminated"); return true;
     case "jump_to_task":
-      if (cond.actionTarget) {
-        const targetIdx = pipeline.tasks.findIndex((t) => t.id === cond.actionTarget);
-        if (targetIdx >= 0) {
-          pipeline.currentTaskIndex = targetIdx;
-          store.dirty = true;
-          flushStore();
-          return true; // 跳轉由外層迴圈處理
-        }
-      }
+      if (cond.actionTarget) { const idx = pipeline.tasks.findIndex(t => t.id === cond.actionTarget); if (idx >= 0) { pipeline.currentTaskIndex = idx; pipelineStore.dirty = true; flushPipelines(); return true; } }
       return false;
     case "repeat_from":
-      // 從某任務重新開始（跳回指定任務）
-      if (cond.actionTarget) {
-        const targetIdx = pipeline.tasks.findIndex((t) => t.id === cond.actionTarget);
-        if (targetIdx >= 0) {
-          pipeline.currentTaskIndex = targetIdx;
-          // 重設該任務之後的所有任務狀態
-          for (let i = targetIdx; i < pipeline.tasks.length; i++) {
-            pipeline.tasks[i].status = "pending";
-            pipeline.tasks[i].result = "";
-            pipeline.tasks[i].startedAt = null;
-            pipeline.tasks[i].completedAt = null;
-          }
-          store.dirty = true;
-          flushStore();
-          return true;
-        }
-      }
+      if (cond.actionTarget) { const idx = pipeline.tasks.findIndex(t => t.id === cond.actionTarget); if (idx >= 0) { pipeline.currentTaskIndex = idx; for (let i = idx; i < pipeline.tasks.length; i++) { pipeline.tasks[i].status = "pending"; pipeline.tasks[i].result = ""; pipeline.tasks[i].startedAt = null; pipeline.tasks[i].completedAt = null; } pipelineStore.dirty = true; flushPipelines(); return true; } }
       return false;
-    default:
-      return false;
+    default: return false;
   }
 }
 
-/** 檢查任務層級條件（on_success / on_failure） */
 function checkTaskCondition(condition, pipeline, tasks, currentTask, currentIdx, ctx) {
   switch (condition.action) {
-    case "continue":
-      return { action: "continue" };
-    case "skip_next":
-      // 跳過下一個任務
-      if (currentIdx + 1 < tasks.length) {
-        tasks[currentIdx + 1].status = "skipped";
-        store.dirty = true;
-        flushStore();
-      }
-      return { action: "continue" };
-    case "jump_to":
-      if (condition.actionTarget) {
-        const targetIdx = tasks.findIndex((t) => t.id === condition.actionTarget);
-        if (targetIdx >= 0) {
-          pipeline.currentTaskIndex = targetIdx;
-          store.dirty = true;
-          flushStore();
-          return { action: "jump", targetIdx };
-        }
-      }
-      return { action: "continue" };
-    case "retry":
-      // 重設目前任務為 pending
-      currentTask.status = "pending";
-      currentTask.result = "";
-      currentTask.startedAt = null;
-      currentTask.completedAt = null;
-      currentTask.repeatCount = 0;
-      store.dirty = true;
-      flushStore();
-      return { action: "retry" };
-    case "terminate":
-      pipeline.status = "terminated";
-      pipeline.completedAt = nowISO();
-      store.dirty = true;
-      flushStore();
-      broadcastEvent(ctx, pipeline.id, "pipeline_terminated");
-      return { action: "terminate" };
-    default:
-      return { action: "continue" };
+    case "continue": return { action: "continue" };
+    case "skip_next": if (currentIdx + 1 < tasks.length) { tasks[currentIdx + 1].status = "skipped"; pipelineStore.dirty = true; flushPipelines(); } return { action: "continue" };
+    case "jump_to": if (condition.actionTarget) { const idx = tasks.findIndex(t => t.id === condition.actionTarget); if (idx >= 0) { pipeline.currentTaskIndex = idx; pipelineStore.dirty = true; flushPipelines(); return { action: "jump", targetIdx: idx }; } } return { action: "continue" };
+    case "retry": currentTask.status = "pending"; currentTask.result = ""; currentTask.startedAt = null; currentTask.completedAt = null; currentTask.repeatCount = 0; pipelineStore.dirty = true; flushPipelines(); return { action: "retry" };
+    case "terminate": pipeline.status = "terminated"; pipeline.completedAt = nowISO(); pipelineStore.dirty = true; flushPipelines(); broadcastEvent(ctx, pipeline.id, "pipeline_terminated"); return { action: "terminate" };
+    default: return { action: "continue" };
   }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  核心執行引擎
+//  核心執行引擎（支援按 Agent 分派任務）
 // ═══════════════════════════════════════════════════════════════════════════
 
-/**
- * 發送 prompt 給 Agent 並等待回應
- *
- * 透過 subscribeSessionEvents 監聽 session 事件，
- * 當接收到回應事件時 resolve Promise。
- */
 function sendAndWait(ctx, sessionPath, prompt, pipelineId) {
   return new Promise((resolve, reject) => {
-    const timeoutMs = 300000; // 5 分鐘
+    const timeoutMs = 300000;
     let settled = false;
-
-    const timer = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        unsub();
-        reject(new Error("等待 Agent 回應逾時（5 分鐘）"));
-      }
-    }, timeoutMs);
-
+    const timer = setTimeout(() => { if (!settled) { settled = true; unsub(); reject(new Error("等待 Agent 回應逾時（5 分鐘）")); } }, timeoutMs);
     const unsub = subscribeSessionEvents(ctx, sessionPath, (event) => {
       if (settled) return;
-
-      // 偵測回應事件 — 支援多種可能的事件型別
-      const eventType = event.type || "";
-      if (
-        eventType === "session:conversation:response" ||
-        eventType === "session:message:response" ||
-        eventType === "session:response" ||
-        eventType.endsWith(":response") ||
-        (eventType.includes("completed") &&
-          !eventType.includes("task") &&
-          !eventType.includes("pipeline"))
-      ) {
-        settled = true;
-        clearTimeout(timer);
-        unsub();
-
-        // 從事件中萃取回應文字
-        const responseText =
-          event.text ||
-          event.content ||
-          event.response ||
-          (typeof event.message === "string" ? event.message : "") ||
-          JSON.stringify(event);
-
-        resolve(responseText);
+      const et = event.type || "";
+      if (et === "session:conversation:response" || et === "session:message:response" || et === "session:response" || et.endsWith(":response") || (et.includes("completed") && !et.includes("task") && !et.includes("pipeline"))) {
+        settled = true; clearTimeout(timer); unsub();
+        resolve(event.text || event.content || event.response || (typeof event.message === "string" ? event.message : "") || JSON.stringify(event));
       }
     });
-
-    // 發送 prompt 給 session 中的 Agent
-    sendSessionMessage(ctx, sessionPath, { content: prompt }).catch((err) => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timer);
-        unsub();
-        reject(err);
-      }
-    });
+    sendSessionMessage(ctx, sessionPath, { content: prompt }).catch((err) => { if (!settled) { settled = true; clearTimeout(timer); unsub(); reject(err); } });
   });
 }
 
-/**
- * 等待管線 resume（用於 pause 狀態）
- */
 function waitForResume(pipelineId) {
-  return new Promise((resolve) => {
-    const exec = executions.get(pipelineId);
-    if (exec) {
-      exec.pauseResolve = resolve;
-    }
-  });
+  return new Promise((resolve) => { const exec = executions.get(pipelineId); if (exec) exec.pauseResolve = resolve; });
 }
 
 /**
- * 執行完整的管線（非同步背景執行）
+ * 執行完整的管線 — 每個任務會依 agentId 分派到對應的 Agent Session
  */
-async function executePipeline(pipeline, sessionPath, ctx) {
+async function executePipeline(pipeline, ctx) {
   const execCtx = executions.get(pipeline.id);
   if (!execCtx) return;
 
-  try {
-    // 按 orderIndex 排序任務
-    const sortedTasks = [...pipeline.tasks].sort((a, b) => a.orderIndex - b.orderIndex);
+  // 對 pipeline 中的每個 Agent，先確保 session 已存在
+  const agentIds = new Set([pipeline.agentId]);
+  for (const t of pipeline.tasks) {
+    if (t.agentId) agentIds.add(t.agentId);
+  }
+  for (const aid of agentIds) {
+    try {
+      if (!sessionsStore.sessions[aid]) {
+        await getAgentSession(ctx, aid);
+      }
+    } catch (err) {
+      console.error(`[TaskLoop] 無法為 Agent "${aid}" 建立 session:`, err);
+    }
+  }
 
+  try {
+    const sortedTasks = [...pipeline.tasks].sort((a, b) => a.orderIndex - b.orderIndex);
     let i = 0;
     while (i < sortedTasks.length) {
-      // 檢查終止狀態
       if (pipeline.status === "terminated") break;
-
-      // 暫停時等待恢復
-      if (pipeline.status === "paused") {
-        await waitForResume(pipeline.id);
-        if (pipeline.status === "terminated") break;
-      }
+      if (pipeline.status === "paused") { await waitForResume(pipeline.id); if (pipeline.status === "terminated") break; }
 
       const task = sortedTasks[i];
       pipeline.currentTaskIndex = i;
-      store.dirty = true;
-      flushStore();
+      pipelineStore.dirty = true; flushPipelines();
 
-      // 若該任務已被跳過，直接跳過
-      if (task.status === "skipped") {
-        i++;
-        continue;
+      if (task.status === "skipped") { i++; continue; }
+
+      // 決定此任務要發送給哪個 Agent
+      const targetAgentId = task.agentId || pipeline.agentId || "coder";
+      const sessionInfo = sessionsStore.sessions[targetAgentId];
+      if (!sessionInfo || !sessionInfo.sessionPath) {
+        throw new Error(`Agent "${targetAgentId}" 沒有可用的 session`);
       }
+      const sessionPath = sessionInfo.sessionPath;
 
-      // ── 重複執行迴圈 ──
       let runCount = 0;
       const maxRepeats = task.repeat || 1;
-
       while (runCount < maxRepeats) {
         if (pipeline.status === "terminated") break;
         if (pipeline.status === "paused") await waitForResume(pipeline.id);
         if (pipeline.status === "terminated") break;
 
-        // 設為執行中
         task.status = "running";
         task.startedAt = nowISO();
         task.result = "";
-        store.dirty = true;
-        flushStore();
+        pipelineStore.dirty = true; flushPipelines();
 
-        // 廣播事件
         broadcastEvent(ctx, pipeline.id, "task_started", task.id, i,
-          `開始執行任務：${task.name}`);
+          `[${targetAgentId}] 開始執行任務：${task.name}`);
 
         try {
-          // 發送 prompt 給 Agent 並等待回應
           const response = await sendAndWait(ctx, sessionPath, task.prompt, pipeline.id);
-
-          // 如果執行已被終止（可能發生在等待期間）
           if (pipeline.status === "terminated") break;
 
-          // 任務完成
           task.status = "completed";
           task.result = response;
           task.completedAt = nowISO();
           task.repeatCount = runCount + 1;
-          store.dirty = true;
-          flushStore();
+          pipelineStore.dirty = true; flushPipelines();
+
+          // 記錄 session 活動時間
+          if (sessionsStore.sessions[targetAgentId]) {
+            sessionsStore.sessions[targetAgentId].lastActivity = nowISO();
+            flushSessions();
+          }
 
           broadcastEvent(ctx, pipeline.id, "task_completed", task.id, i,
-            `任務完成：${task.name}（第 ${runCount + 1}/${maxRepeats} 次）`);
+            `[${targetAgentId}] 任務完成：${task.name}（第 ${runCount + 1}/${maxRepeats} 次）`);
 
-          // 檢查任務條件 (on_success)
-          const successCond = task.conditions.find((c) => c.type === "on_success");
+          const successCond = task.conditions.find(c => c.type === "on_success");
           if (successCond) {
             const result = checkTaskCondition(successCond, pipeline, sortedTasks, task, i, ctx);
             if (result.action === "terminate") break;
-            if (result.action === "jump") {
-              i = result.targetIdx;
-              break; // 跳出 while(runCount) 和 for loop，重新從 targetIdx 開始
-            }
-            if (result.action === "retry") {
-              runCount = 0; // 重新計數
-              continue;
-            }
+            if (result.action === "jump") { i = result.targetIdx; break; }
+            if (result.action === "retry") { runCount = 0; continue; }
           }
-
           runCount++;
         } catch (err) {
-          // 任務失敗
           if (pipeline.status === "terminated") break;
-
           task.status = "failed";
           task.completedAt = nowISO();
           task.result = err.message || String(err);
-          store.dirty = true;
-          flushStore();
-
+          pipelineStore.dirty = true; flushPipelines();
           broadcastEvent(ctx, pipeline.id, "task_failed", task.id, i,
-            `任務失敗：${task.name} - ${err.message}`);
-
-          // 檢查任務條件 (on_failure)
-          const failureCond = task.conditions.find((c) => c.type === "on_failure");
+            `[${targetAgentId}] 任務失敗：${task.name} - ${err.message}`);
+          const failureCond = task.conditions.find(c => c.type === "on_failure");
           if (failureCond) {
             const result = checkTaskCondition(failureCond, pipeline, sortedTasks, task, i, ctx);
             if (result.action === "terminate") break;
-            if (result.action === "retry") {
-              continue; // 重試
-            }
+            if (result.action === "retry") continue;
           }
-
-          runCount = maxRepeats; // 失敗後不繼續重複
-        }
-
-        // 檢查 repeat_until 條件
-        const repeatUntilCond = task.conditions.find((c) => c.type === "repeat_until");
-        if (repeatUntilCond && runCount < maxRepeats) {
-          // continue the while loop
+          runCount = maxRepeats;
         }
       }
-
-      // 檢查全局條件
-      if (checkGlobalConditions(pipeline, ctx)) {
-        // 條件觸發了 pause/terminate，跳出
-        break;
-      }
-
+      if (checkGlobalConditions(pipeline, ctx)) break;
       i++;
-
-      // 如果條件跳轉修改了 currentTaskIndex，更新 i
       if (pipeline.currentTaskIndex >= 0 && pipeline.currentTaskIndex !== i && pipeline.currentTaskIndex < sortedTasks.length) {
         i = pipeline.currentTaskIndex;
       }
     }
 
-    // 若管線不是被中斷（terminated/paused），則設為 completed
     if (pipeline.status === "running") {
       pipeline.status = "completed";
       pipeline.completedAt = nowISO();
       pipeline.currentTaskIndex = -1;
-      store.dirty = true;
-      flushStore();
+      pipelineStore.dirty = true; flushPipelines();
       broadcastEvent(ctx, pipeline.id, "pipeline_completed");
     }
   } catch (err) {
     console.error("[TaskLoop] 執行引擎錯誤:", err);
     pipeline.status = "terminated";
     pipeline.completedAt = nowISO();
-    store.dirty = true;
-    flushStore();
+    pipelineStore.dirty = true; flushPipelines();
     broadcastEvent(ctx, pipeline.id, "pipeline_terminated", null, null, err.message);
   } finally {
     executions.delete(pipeline.id);
-    flushStore();
+    flushPipelines();
   }
 }
 
@@ -594,120 +532,56 @@ async function executePipeline(pipeline, sessionPath, ctx) {
 //  EventBus 處理器
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** 處理器：建立管線 */
 const createPipelineHandler = defineBusHandler({
   type: "taskloop:create-pipeline",
   async handle(payload, ctx) {
-    if (!payload || !payload.name) {
-      return { ok: false, error: "缺少必要欄位：name" };
-    }
-    const pipeline = createPipeline(payload);
-    return { ok: true, pipeline };
+    if (!payload || !payload.name) return { ok: false, error: "缺少必要欄位：name" };
+    return { ok: true, pipeline: createPipeline(payload) };
   },
 });
 
-/** 處理器：取得單一管線 */
 const getPipelineHandler = defineBusHandler({
   type: "taskloop:get-pipeline",
   async handle(payload, ctx) {
-    if (!payload || !payload.id) {
-      return { ok: false, error: "缺少必要欄位：id" };
-    }
+    if (!payload || !payload.id) return { ok: false, error: "缺少必要欄位：id" };
     const pipeline = getPipeline(payload.id);
-    if (!pipeline) {
-      return { ok: false, error: "管線不存在" };
-    }
-    return { ok: true, pipeline };
+    return pipeline ? { ok: true, pipeline } : { ok: false, error: "管線不存在" };
   },
 });
 
-/** 處理器：列出所有管線 */
 const listPipelinesHandler = defineBusHandler({
   type: "taskloop:list-pipelines",
   async handle(payload, ctx) {
-    const pipelines = listPipelines();
-    return { ok: true, pipelines };
+    return { ok: true, pipelines: listPipelines() };
   },
 });
 
-/** 處理器：更新管線 */
 const updatePipelineHandler = defineBusHandler({
   type: "taskloop:update-pipeline",
   async handle(payload, ctx) {
-    if (!payload || !payload.id) {
-      return { ok: false, error: "缺少必要欄位：id" };
-    }
+    if (!payload || !payload.id) return { ok: false, error: "缺少必要欄位：id" };
     const pipeline = updatePipeline(payload.id, payload);
-    if (!pipeline) {
-      return { ok: false, error: "管線不存在" };
-    }
-    return { ok: true, pipeline };
+    return pipeline ? { ok: true, pipeline } : { ok: false, error: "管線不存在" };
   },
 });
 
-/** 處理器：刪除管線 */
 const deletePipelineHandler = defineBusHandler({
   type: "taskloop:delete-pipeline",
   async handle(payload, ctx) {
-    if (!payload || !payload.id) {
-      return { ok: false, error: "缺少必要欄位：id" };
-    }
-    const result = deletePipeline(payload.id);
-    if (!result) {
-      return { ok: false, error: "管線不存在" };
-    }
-    return { ok: true, deleted: true };
+    if (!payload || !payload.id) return { ok: false, error: "缺少必要欄位：id" };
+    return deletePipeline(payload.id) ? { ok: true, deleted: true } : { ok: false, error: "管線不存在" };
   },
 });
 
-/** 處理器：開始執行管線 */
 const startPipelineHandler = defineBusHandler({
   type: "taskloop:start-pipeline",
   async handle(payload, ctx) {
-    if (!payload || !payload.id) {
-      return { ok: false, error: "缺少必要欄位：id" };
-    }
+    if (!payload || !payload.id) return { ok: false, error: "缺少必要欄位：id" };
 
     const pipeline = getPipeline(payload.id);
-    if (!pipeline) {
-      return { ok: false, error: "管線不存在" };
-    }
+    if (!pipeline) return { ok: false, error: "管線不存在" };
+    if (pipeline.status === "running") return { ok: false, error: "管線正在執行中" };
 
-    if (pipeline.status === "running") {
-      return { ok: false, error: "管線正在執行中" };
-    }
-
-    // 解析 sessionPath：優先使用 payload 提供的，否則從 agentId 自動建立
-    let sessionPath = payload.sessionPath;
-    if (!sessionPath) {
-      const agentId = payload.agentId;
-      if (!agentId) {
-        return { ok: false, error: "缺少必要欄位：sessionPath 或 agentId" };
-      }
-
-      // 檢查快取
-      if (_sessionCache.has(agentId)) {
-        sessionPath = _sessionCache.get(agentId);
-      } else {
-        try {
-          const session = await createSession(ctx, {
-            agentId,
-            kind: "taskloop",
-            visibility: "plugin_private",
-            cwd: ctx.dataDir,
-          });
-          sessionPath = session.sessionPath || session.path || session.id;
-          if (!sessionPath) {
-            return { ok: false, error: "建立 session 成功但無法取得 path" };
-          }
-          _sessionCache.set(agentId, sessionPath);
-        } catch (err) {
-          return { ok: false, error: `無法建立執行用 session: ${err.message}` };
-        }
-      }
-    }
-
-    // 若已有執行記錄則先清除
     if (executions.has(pipeline.id)) {
       const existing = executions.get(pipeline.id);
       if (existing.abortCtrl) existing.abortCtrl.abort();
@@ -720,212 +594,138 @@ const startPipelineHandler = defineBusHandler({
     pipeline.completedAt = null;
     pipeline.currentTaskIndex = 0;
     for (const t of pipeline.tasks) {
-      t.status = "pending";
-      t.result = "";
-      t.startedAt = null;
-      t.completedAt = null;
-      t.repeatCount = 0;
+      t.status = "pending"; t.result = ""; t.startedAt = null; t.completedAt = null; t.repeatCount = 0;
     }
-    store.dirty = true;
-    flushStore();
+    pipelineStore.dirty = true; flushPipelines();
 
-    // 建立執行上下文
     const execCtx = {
       pipeline,
-      sessionPath,
       status: "running",
       abortCtrl: new AbortController(),
       pauseResolve: null,
     };
     executions.set(pipeline.id, execCtx);
 
-    // 背景執行（不 await，讓 handler 立即回傳）
-    executePipeline(pipeline, sessionPath, ctx).catch((err) => {
-      console.error("[TaskLoop] 執行引擎異常:", err);
-    });
+    // 背景執行
+    executePipeline(pipeline, ctx).catch(err => console.error("[TaskLoop] 執行引擎異常:", err));
 
-    return {
-      ok: true,
-      message: "管線已開始執行",
-      pipeline: {
-        id: pipeline.id,
-        name: pipeline.name,
-        status: pipeline.status,
-        totalTasks: pipeline.tasks.length,
-      },
-    };
+    return { ok: true, message: "管線已開始執行", pipeline: { id: pipeline.id, name: pipeline.name, status: pipeline.status, totalTasks: pipeline.tasks.length } };
   },
 });
 
-/** 處理器：終止管線 */
 const terminatePipelineHandler = defineBusHandler({
   type: "taskloop:terminate-pipeline",
   async handle(payload, ctx) {
-    if (!payload || !payload.id) {
-      return { ok: false, error: "缺少必要欄位：id" };
-    }
-
+    if (!payload || !payload.id) return { ok: false, error: "缺少必要欄位：id" };
     const pipeline = getPipeline(payload.id);
-    if (!pipeline) {
-      return { ok: false, error: "管線不存在" };
-    }
+    if (!pipeline) return { ok: false, error: "管線不存在" };
 
-    pipeline.status = "terminated";
-    pipeline.completedAt = nowISO();
+    pipeline.status = "terminated"; pipeline.completedAt = nowISO();
+    for (const t of pipeline.tasks) { if (t.status === "running") { t.status = "failed"; t.completedAt = nowISO(); } }
+    pipelineStore.dirty = true; flushPipelines();
 
-    // 將執行中的任務標記為 failed
-    for (const t of pipeline.tasks) {
-      if (t.status === "running") {
-        t.status = "failed";
-        t.completedAt = nowISO();
-      }
-    }
-    store.dirty = true;
-    flushStore();
-
-    // 中斷執行引擎
     const execCtx = executions.get(pipeline.id);
     if (execCtx) {
       if (execCtx.abortCtrl) execCtx.abortCtrl.abort();
-      if (execCtx.pauseResolve) {
-        execCtx.pauseResolve();
-      }
+      if (execCtx.pauseResolve) execCtx.pauseResolve();
       executions.delete(pipeline.id);
     }
-
     broadcastEvent(ctx, pipeline.id, "pipeline_terminated");
-
     return { ok: true, message: "管線已終止" };
   },
 });
 
-/** 處理器：暫停管線 */
 const pausePipelineHandler = defineBusHandler({
   type: "taskloop:pause-pipeline",
   async handle(payload, ctx) {
-    if (!payload || !payload.id) {
-      return { ok: false, error: "缺少必要欄位：id" };
-    }
-
+    if (!payload || !payload.id) return { ok: false, error: "缺少必要欄位：id" };
     const pipeline = getPipeline(payload.id);
-    if (!pipeline) {
-      return { ok: false, error: "管線不存在" };
-    }
-
-    if (pipeline.status !== "running") {
-      return { ok: false, error: "管線不在執行中狀態" };
-    }
-
-    pipeline.status = "paused";
-    store.dirty = true;
-    flushStore();
-
+    if (!pipeline) return { ok: false, error: "管線不存在" };
+    if (pipeline.status !== "running") return { ok: false, error: "管線不在執行中狀態" };
+    pipeline.status = "paused"; pipelineStore.dirty = true; flushPipelines();
     return { ok: true, message: "管線已暫停" };
   },
 });
 
-/** 處理器：繼續管線 */
 const resumePipelineHandler = defineBusHandler({
   type: "taskloop:resume-pipeline",
   async handle(payload, ctx) {
-    if (!payload || !payload.id) {
-      return { ok: false, error: "缺少必要欄位：id" };
-    }
-
+    if (!payload || !payload.id) return { ok: false, error: "缺少必要欄位：id" };
     const pipeline = getPipeline(payload.id);
-    if (!pipeline) {
-      return { ok: false, error: "管線不存在" };
-    }
-
-    if (pipeline.status !== "paused") {
-      return { ok: false, error: "管線不在暫停狀態" };
-    }
-
-    pipeline.status = "running";
-    store.dirty = true;
-    flushStore();
-
-    // 若有等待中的 pauseResolve，喚醒執行引擎
+    if (!pipeline) return { ok: false, error: "管線不存在" };
+    if (pipeline.status !== "paused") return { ok: false, error: "管線不在暫停狀態" };
+    pipeline.status = "running"; pipelineStore.dirty = true; flushPipelines();
     const execCtx = executions.get(pipeline.id);
-    if (execCtx && execCtx.pauseResolve) {
-      const resolve = execCtx.pauseResolve;
-      execCtx.pauseResolve = null;
-      resolve();
-    }
-
+    if (execCtx && execCtx.pauseResolve) { const resolve = execCtx.pauseResolve; execCtx.pauseResolve = null; resolve(); }
     return { ok: true, message: "管線已恢復執行" };
   },
 });
 
-/** 處理器：查詢管線執行狀態 */
 const pipelineStatusHandler = defineBusHandler({
   type: "taskloop:pipeline-status",
   async handle(payload, ctx) {
-    if (!payload || !payload.id) {
-      return { ok: false, error: "缺少必要欄位：id" };
-    }
-
+    if (!payload || !payload.id) return { ok: false, error: "缺少必要欄位：id" };
     const pipeline = getPipeline(payload.id);
-    if (!pipeline) {
-      return { ok: false, error: "管線不存在" };
-    }
-
+    if (!pipeline) return { ok: false, error: "管線不存在" };
     const { completed, failed } = countTaskStatuses(pipeline);
     const execCtx = executions.get(payload.id);
-
     return {
-      ok: true,
-      status: pipeline.status,
-      currentTaskIndex: pipeline.currentTaskIndex,
-      totalTasks: pipeline.tasks.length,
-      completedTasks: completed,
-      failedTasks: failed,
-      tasks: pipeline.tasks.map((t) => ({
-        id: t.id,
-        name: t.name,
-        orderIndex: t.orderIndex,
-        status: t.status,
-        repeat: t.repeat,
-        repeatCount: t.repeatCount,
-        result: t.result ? t.result.substring(0, 500) : "",
-        startedAt: t.startedAt,
-        completedAt: t.completedAt,
-      })),
-      isRunning: execCtx ? true : false,
-      startedAt: pipeline.startedAt,
-      completedAt: pipeline.completedAt,
+      ok: true, status: pipeline.status, currentTaskIndex: pipeline.currentTaskIndex,
+      totalTasks: pipeline.tasks.length, completedTasks: completed, failedTasks: failed,
+      tasks: pipeline.tasks.map(t => ({ id: t.id, name: t.name, orderIndex: t.orderIndex, status: t.status, repeat: t.repeat, repeatCount: t.repeatCount, result: t.result ? t.result.substring(0, 500) : "", startedAt: t.startedAt, completedAt: t.completedAt })),
+      isRunning: !!execCtx, startedAt: pipeline.startedAt, completedAt: pipeline.completedAt,
     };
   },
 });
 
-/** 處理器：通用狀態查詢（插件存活檢查） */
 const statusHandler = defineBusHandler({
   type: "taskloop:status",
   async handle(payload, ctx) {
     if (payload?.pluginId && payload.pluginId !== ctx.pluginId) return HANA_BUS_SKIP;
-    return {
-      ok: true,
-      pluginId: ctx.pluginId,
-      name: "TaskLoop",
-      pipelinesCount: store.pipelines.length,
-      activeExecutions: executions.size,
-    };
+    return { ok: true, pluginId: ctx.pluginId, name: "TaskLoop", pipelinesCount: pipelineStore.pipelines.length, activeExecutions: executions.size };
   },
 });
 
-// 所有 handler 的列表，方便註冊
+/** 處理器：列出 Agent Sessions */
+const listSessionsHandler = defineBusHandler({
+  type: "taskloop:list-sessions",
+  async handle(payload, ctx) {
+    return { ok: true, sessions: listAgentSessions() };
+  },
+});
+
+/** 處理器：讀取特定 Agent Session 的訊息 */
+const readSessionHandler = defineBusHandler({
+  type: "taskloop:read-session",
+  async handle(payload, ctx) {
+    if (!payload || !payload.agentId) return { ok: false, error: "缺少必要欄位：agentId" };
+    const limit = payload.limit || 50;
+    const result = readSessionMessages(payload.agentId, limit);
+    return { ok: true, ...result };
+  },
+});
+
+/** 處理器：確保 Agent Session 存在（可預先建立） */
+const ensureSessionHandler = defineBusHandler({
+  type: "taskloop:ensure-session",
+  async handle(payload, ctx) {
+    if (!payload || !payload.agentId) return { ok: false, error: "缺少必要欄位：agentId" };
+    try {
+      const info = await getAgentSession(ctx, payload.agentId);
+      return { ok: true, session: { agentId: info.agentId, sessionPath: info.sessionPath, createdAt: info.createdAt } };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  },
+});
+
 const handlers = [
-  createPipelineHandler,
-  getPipelineHandler,
-  listPipelinesHandler,
-  updatePipelineHandler,
-  deletePipelineHandler,
-  startPipelineHandler,
-  terminatePipelineHandler,
-  pausePipelineHandler,
-  resumePipelineHandler,
-  pipelineStatusHandler,
+  createPipelineHandler, getPipelineHandler, listPipelinesHandler,
+  updatePipelineHandler, deletePipelineHandler,
+  startPipelineHandler, terminatePipelineHandler,
+  pausePipelineHandler, resumePipelineHandler, pipelineStatusHandler,
   statusHandler,
+  listSessionsHandler, readSessionHandler, ensureSessionHandler,
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -934,17 +734,17 @@ const handlers = [
 
 export default definePlugin({
   async onload(ctx, { register }) {
-    // 初始化儲存
     const dataDir = ctx.dataDir || ctx.pluginDir;
     if (!dataDir) {
       ctx.log.error("TaskLoop: dataDir 和 pluginDir 均為空，無法初始化儲存");
       return;
     }
-    const filePath = path.join(dataDir, "pipelines.json");
-    loadStore(filePath);
-
-    // 確保 dataDir 存在
     fs.mkdirSync(dataDir, { recursive: true });
+
+    // 載入管線資料
+    loadPipelines(path.join(dataDir, "pipelines.json"));
+    // 載入 Session 資料
+    loadSessions(path.join(dataDir, "session-map.json"));
 
     // 註冊所有 bus handler
     for (const h of handlers) {
@@ -953,30 +753,21 @@ export default definePlugin({
       }
     }
 
-    ctx.log.info(`TaskLoop loaded (${store.pipelines.length} pipelines)`);
+    ctx.log.info(`TaskLoop loaded (${pipelineStore.pipelines.length} pipelines, ${Object.keys(sessionsStore.sessions).length} agent sessions)`);
   },
 
   async onunload(ctx) {
-    // 終止所有活躍執行
     for (const [pid, execCtx] of executions) {
       const pipeline = getPipeline(pid);
       if (pipeline) {
-        pipeline.status = "terminated";
-        pipeline.completedAt = nowISO();
-        for (const t of pipeline.tasks) {
-          if (t.status === "running") {
-            t.status = "failed";
-            t.completedAt = nowISO();
-          }
-        }
+        pipeline.status = "terminated"; pipeline.completedAt = nowISO();
+        for (const t of pipeline.tasks) { if (t.status === "running") { t.status = "failed"; t.completedAt = nowISO(); } }
       }
       if (execCtx.abortCtrl) execCtx.abortCtrl.abort();
     }
     executions.clear();
-
-    // 若有未寫入的變更，寫回檔案
-    flushStore();
-
+    flushPipelines();
+    flushSessions();
     ctx.log.info("TaskLoop unloaded");
   },
 });

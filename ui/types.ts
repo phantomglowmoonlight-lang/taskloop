@@ -24,7 +24,7 @@ export interface GlobalCondition {
   type: GlobalConditionType;
   config: Record<string, unknown>;
   action: ConditionAction;
-  actionTarget: string | null; // 目標任務 ID
+  actionTarget: string | null;
 }
 
 /** 任務條件 */
@@ -42,8 +42,9 @@ export interface Task {
   orderIndex: number;
   name: string;
   prompt: string;
-  repeat: number;           // 重複次數，預設 1
-  repeatCount: number;      // 已執行次數
+  agentId?: string;        // 指定執行此任務的 Agent，不填則用管線預設
+  repeat: number;
+  repeatCount: number;
   conditions: TaskCondition[];
   status: TaskStatus;
   result: string;
@@ -56,6 +57,7 @@ export interface Pipeline {
   id: string;
   name: string;
   description: string;
+  agentId: string;         // 主負責 Agent（預設 "coder"）
   createdAt: string;
   updatedAt: string;
   tasks: Task[];
@@ -70,6 +72,7 @@ export interface Pipeline {
 export interface CreatePipelineInput {
   name: string;
   description?: string;
+  agentId?: string;
   tasks?: Omit<Task, 'id' | 'status' | 'result' | 'startedAt' | 'completedAt' | 'repeatCount'>[];
   globalConditions?: GlobalCondition[];
 }
@@ -84,18 +87,26 @@ export interface PipelineExecutionEvent {
   timestamp: string;
 }
 
-/** UI 專用：條件設定欄位描述 */
-export interface ConditionConfigField {
-  key: keyof GlobalCondition['config'];
-  label: string;
-  type: 'number' | 'text';
-  placeholder?: string;
-}
-
-/** UI 專用：管線表單資料（不含伺服器管理欄位） */
+/** UI 專用：管線表單資料 */
 export interface PipelineFormData {
   name: string;
   description: string;
+  agentId: string;
   tasks: Task[];
   globalConditions: GlobalCondition[];
+}
+
+/** Session 訊息（供前端顯示） */
+export interface SessionMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  timestamp: string;
+}
+
+/** Agent Session 資訊 */
+export interface AgentSessionInfo {
+  agentId: string;
+  sessionPath: string;
+  lastActivity: string | null;
+  messageCount: number;
 }
