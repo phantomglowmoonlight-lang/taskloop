@@ -161,18 +161,55 @@ export default function BlueprintEditor({
     return nodes;
   }, [tasks]);
 
-  // 根據節點建立連線
+  // 從 tasks[].dependsOn 建立連線，若無 dependsOn 則用 orderIndex 線性連線
   const initialEdges: Edge[] = useMemo(() => {
     const edges: Edge[] = [];
-    const nodeIds = ['start', ...tasks.sort((a, b) => a.orderIndex - b.orderIndex).map(t => t.id), 'end'];
-    for (let i = 0; i < nodeIds.length - 1; i++) {
-      edges.push({
-        id: `e-${nodeIds[i]}-${nodeIds[i + 1]}`,
-        source: nodeIds[i],
-        target: nodeIds[i + 1],
-        type: 'smoothstep',
-        animated: true,
-      });
+    const taskMap = new Map(tasks.map(t => [t.id, t]));
+    const hasAnyDep = tasks.some(t => t.dependsOn && t.dependsOn.length > 0);
+
+    if (hasAnyDep) {
+      // 使用 dependsOn 建立連線
+      for (const t of tasks) {
+        if (t.dependsOn && t.dependsOn.length > 0) {
+          for (const dep of t.dependsOn) {
+            const sourceId = dep; // dependsOn 存的是來源任務的 ID 或名稱
+            if (sourceId && taskMap.has(sourceId)) {
+              edges.push({
+                id: `e-${sourceId}-${t.id}`,
+                source: sourceId,
+                target: t.id,
+                type: 'smoothstep',
+                animated: true,
+              });
+            }
+          }
+        }
+      }
+      // 找出沒有被任何任務 dependsOn 的任務，從 start 連到它們
+      const targeted = new Set(tasks.flatMap(t => t.dependsOn || []));
+      const unordered = tasks.filter(t => !targeted.has(t.id) && !targeted.has(t.name));
+      for (const t of unordered) {
+        edges.push({ id: `e-start-${t.id}`, source: 'start', target: t.id, type: 'smoothstep', animated: true });
+      }
+      // 找出沒有 dependsOn 其他任務的任務，連到 end
+      const hasOutgoing = new Set(tasks.filter(t => t.dependsOn && t.dependsOn.length > 0).map(t => t.id));
+      for (const t of tasks) {
+        if (!hasOutgoing.has(t.id)) {
+          edges.push({ id: `e-${t.id}-end`, source: t.id, target: 'end', type: 'smoothstep', animated: true });
+        }
+      }
+    } else {
+      // 無 dependsOn：按 orderIndex 線性連線
+      const nodeIds = ['start', ...tasks.sort((a, b) => a.orderIndex - b.orderIndex).map(t => t.id), 'end'];
+      for (let i = 0; i < nodeIds.length - 1; i++) {
+        edges.push({
+          id: `e-${nodeIds[i]}-${nodeIds[i + 1]}`,
+          source: nodeIds[i],
+          target: nodeIds[i + 1],
+          type: 'smoothstep',
+          animated: true,
+        });
+      }
     }
     return edges;
   }, [tasks]);
@@ -186,10 +223,25 @@ export default function BlueprintEditor({
     setEdges(initialEdges);
   }, [initialNodes, initialEdges]);
 
-  // 連線處理
+  // 連線處理：更新目標任務的 dependsOn
   const onConnect: OnConnect = useCallback((connection: Connection) => {
+    if (!connection.source || !connection.target) return;
+    if (connection.source === 'start' || connection.target === 'end' || connection.source === connection.target) return;
+    if (connection.source === 'end' || connection.target === 'start') return;
+
+    const targetTask = tasks.find(t => t.id === connection.target);
+    if (!targetTask) return;
+
+    const newDependsOn = [...(targetTask.dependsOn || [])];
+    if (!newDependsOn.includes(connection.source)) {
+      newDependsOn.push(connection.source);
+      onTasksChange(tasks.map(t =>
+        t.id === targetTask.id ? { ...t, dependsOn: newDependsOn } : t
+      ));
+    }
+
     setEdges((eds) => addEdge({ ...connection, type: 'smoothstep', animated: true }, eds));
-  }, [setEdges]);
+  }, [tasks, onTasksChange, setEdges]);
 
   // 節點選取
   const onNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
@@ -199,6 +251,16 @@ export default function BlueprintEditor({
   const onPaneClick = useCallback(() => {
     setSelectedNode(null);
   }, []);
+
+  // 鍵盤刪除節點 → 實際刪除任務
+  const onNodesDelete = useCallback((deletedNodes: Node[]) => {
+    const deletedIds = new Set(deletedNodes.map(n => n.id));
+    const remaining = tasks.filter(t => !deletedIds.has(t.id)).map((t, i) => ({ ...t, orderIndex: i }));
+    onTasksChange(remaining);
+    if (selectedNode && deletedIds.has(selectedNode.id)) {
+      setSelectedNode(null);
+    }
+  }, [tasks, onTasksChange, selectedNode]);
 
   // 新增任務
   const addNewTask = useCallback(() => {
@@ -340,6 +402,7 @@ export default function BlueprintEditor({
             onConnect={onConnect}
             onNodeClick={onNodeClick}
             onPaneClick={onPaneClick}
+            onNodesDelete={onNodesDelete}
             nodeTypes={nodeTypes}
             fitView
             fitViewOptions={{ padding: 0.3 }}

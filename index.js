@@ -337,6 +337,7 @@ function checkGlobalConditions(pipeline, ctx) {
         break;
       }
       case "max_failures": {
+        normalizeConditionConfig(cond.config);
         const maxFail = Number(cond.config?.count) || 0;
         if (failed >= maxFail && maxFail > 0) {
           broadcastEvent(ctx, pipeline.id, "condition_triggered", null, null,
@@ -473,17 +474,36 @@ function triggerContextCompression(ctx, sessionPath, agentId, reason) {
 
 const MAX_CONSECUTIVE_HALLUCINATIONS = 3;
 
-function sendAndWait(ctx, sessionPath, prompt, pipelineId, msgId, agentId) {
+/**
+ * 發送 prompt 給 Agent 並等待回應
+ * 支援 AbortSignal 中斷
+ */
+function sendAndWait(ctx, sessionPath, prompt, pipelineId, msgId, agentId, signal) {
   return new Promise((resolve, reject) => {
     const timeoutMs = 300000;
     let settled = false;
 
-    // 包裝 prompt：帶入操作指南 + 編號
+    // 如果已經被中止，直接拒絕
+    if (signal && signal.aborted) {
+      return reject(new Error(`任務已終止（編號 ${msgId}）`));
+    }
+
     const wrappedPrompt = `${SYSTEM_OPERATION_GUIDE}【${msgId}】\n\n${prompt}`;
 
     const timer = setTimeout(() => {
       if (!settled) { settled = true; unsub(); reject(new Error(`等待 Agent 回應逾時（5 分鐘）— 編號 ${msgId}`)); }
     }, timeoutMs);
+
+    // 監聽中止信號
+    const abortHandler = () => {
+      if (!settled) {
+        settled = true; clearTimeout(timer); unsub();
+        reject(new Error(`任務已終止（編號 ${msgId}）`));
+      }
+    };
+    if (signal) {
+      signal.addEventListener('abort', abortHandler, { once: true });
+    }
 
     const unsub = subscribeSessionEvents(ctx, sessionPath, (event) => {
       if (settled) return;
@@ -491,15 +511,15 @@ function sendAndWait(ctx, sessionPath, prompt, pipelineId, msgId, agentId) {
       if (et === "session:conversation:response" || et === "session:message:response" || et === "session:response" || et.endsWith(":response") || (et.includes("completed") && !et.includes("task") && !et.includes("pipeline"))) {
         const responseText = event.text || event.content || event.response || (typeof event.message === "string" ? event.message : "") || JSON.stringify(event);
 
-        // ── 靜態驗證 ──
         const verdict = verifyResponse(msgId, responseText);
         if (verdict.hallucination) {
           console.warn(`[TaskLoop] ⚠ 幻覺偵測（${agentId}）：回應缺少編號 ${msgId}`);
           triggerContextCompression(ctx, sessionPath, agentId, `回應缺少編號 ${msgId}`);
-          // 不 reject，仍讓上層處理
         }
 
-        settled = true; clearTimeout(timer); unsub();
+        settled = true; clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', abortHandler);
+        unsub();
         resolve({
           text: responseText,
           hallucination: verdict.hallucination,
@@ -515,15 +535,68 @@ function sendAndWait(ctx, sessionPath, prompt, pipelineId, msgId, agentId) {
 }
 
 /**
- * 使用 Hanako 標準方式壓縮整個 Agent Session（透過 bus 事件觸發）
- * 由外部監聽器實際執行壓縮
+ * 使用 Hanako 標準方式壓縮整個 Agent Session
  */
 function compressAgentSession(ctx, agentId, sessionPath) {
   ctx.bus.emit("taskloop:session-compress", {
-    agentId,
-    sessionPath,
-    timestamp: nowISO(),
+    agentId, sessionPath, timestamp: nowISO(),
   }).catch(() => {});
+}
+
+/**
+ * DAG 循環依賴檢測
+ * 回傳 true 表示有循環
+ */
+function hasCycleDependency(tasks) {
+  // 建立鄰接表
+  const adj = new Map();
+  for (const t of tasks) {
+    adj.set(t.id, []);
+  }
+  for (const t of tasks) {
+    if (t.dependsOn && t.dependsOn.length > 0) {
+      for (const dep of t.dependsOn) {
+        // 嘗試比對 ID 或 name
+        const target = tasks.find(t2 => t2.id === dep || t2.name === dep);
+        if (target && adj.has(target.id)) {
+          adj.get(target.id).push(t.id);
+        }
+      }
+    }
+  }
+
+  // DFS 檢測循環
+  const WHITE = 0, GRAY = 1, BLACK = 2;
+  const color = new Map();
+  for (const id of adj.keys()) color.set(id, WHITE);
+
+  function dfs(u) {
+    color.set(u, GRAY);
+    for (const v of (adj.get(u) || [])) {
+      if (color.get(v) === GRAY) return true; // 找到後向邊 = 循環
+      if (color.get(v) === WHITE && dfs(v)) return true;
+    }
+    color.set(u, BLACK);
+    return false;
+  }
+
+  for (const id of adj.keys()) {
+    if (color.get(id) === WHITE && dfs(id)) return true;
+  }
+  return false;
+}
+
+/**
+ * 修復條件配置 key 不一致
+ * 後端某些地方用 `count`，前端某些地方用 `maxFailures`
+ */
+function normalizeConditionConfig(config) {
+  if (!config) return config;
+  // max_failures: 支援 count 或 maxFailures
+  if (config.maxFailures !== undefined && config.count === undefined) {
+    config.count = config.maxFailures;
+  }
+  return config;
 }
 
 function waitForResume(pipelineId) {
@@ -550,6 +623,16 @@ async function executePipeline(pipeline, ctx) {
     } catch (err) {
       console.error(`[TaskLoop] 無法為 Agent "${aid}" 建立 session:`, err);
     }
+  }
+
+  // ── DAG 循環依賴檢測 ──
+  if (hasCycleDependency(pipeline.tasks)) {
+    pipeline.status = "terminated";
+    pipeline.completedAt = nowISO();
+    pipelineStore.dirty = true; flushPipelines();
+    broadcastEvent(ctx, pipeline.id, "pipeline_terminated", null, null, "任務依賴形成循環，管線已終止");
+    executions.delete(pipeline.id);
+    return;
   }
 
   try {
@@ -609,7 +692,8 @@ async function executePipeline(pipeline, ctx) {
           // ── 註冊靜態驗證編號 ──
           const msgId = registerMessage(targetAgentId, task.id);
 
-          const response = await sendAndWait(ctx, sessionPath, task.prompt, pipeline.id, msgId, targetAgentId);
+          const signal = execCtx?.abortCtrl?.signal;
+          const response = await sendAndWait(ctx, sessionPath, task.prompt, pipeline.id, msgId, targetAgentId, signal);
           if (pipeline.status === "terminated") break;
 
           const responseText = typeof response === 'object' ? response.text : response;
