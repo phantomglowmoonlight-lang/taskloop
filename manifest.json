@@ -15,7 +15,7 @@
   "contributes": {
     "page": {
       "title": "TaskLoop",
-      "route": "/page",
+      "route": "/taskloop",
       "icon": "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\"><path d=\"M5 5h14v14H5z\"/><path d=\"M9 9h6M9 13h6\"/></svg>"
     },
     "widget": {

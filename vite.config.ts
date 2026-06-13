@@ -5,14 +5,19 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
+  define: {
+    'process.env.NODE_ENV': JSON.stringify('production'),
+  },
   build: {
     outDir: 'assets',
     emptyOutDir: true,
     sourcemap: true,
     lib: {
       entry: path.resolve(__dirname, 'ui', 'Panel.tsx'),
-      formats: ['es'],
+      formats: ['iife'],
+      name: 'TaskLoop',
       fileName: () => 'panel.js',
+      cssFileName: 'panel',
     },
     rollupOptions: {
       output: {

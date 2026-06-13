@@ -34,6 +34,16 @@ import type {
 const API_BASE = `${window.location.origin}/api/plugins/taskloop`;
 const POLL_INTERVAL_MS = 2000;
 
+// 從頁面 URL 提取 token（HanaAgent 注入的認證參數）
+const TOKEN = new URLSearchParams(window.location.search).get('token') || '';
+
+/** 建構 API URL，自動附加 token 查詢參數 */
+function apiUrl(path: string): string {
+  if (!TOKEN) return `${API_BASE}${path}`;
+  const sep = path.includes('?') ? '&' : '?';
+  return `${API_BASE}${path}${sep}token=${encodeURIComponent(TOKEN)}`;
+}
+
 /** 是否為手機螢幕 */
 const IS_MOBILE = typeof window !== 'undefined' && window.innerWidth < 768;
 
@@ -167,14 +177,14 @@ function createDefaultTaskCondition(): TaskCondition {
 // ─── API 函數 ─────────────────────────────────────────────
 
 async function fetchPipelines(): Promise<Pipeline[]> {
-  const res = await fetch(`${API_BASE}/pipelines`);
+  const res = await fetch(apiUrl('/pipelines'));
   if (!res.ok) throw new Error(`Failed to fetch pipelines: ${res.status}`);
   const json = await res.json();
   return json.pipelines || json;
 }
 
 async function createPipeline(data: PipelineFormData): Promise<Pipeline> {
-  const res = await fetch(`${API_BASE}/pipelines`, {
+  const res = await fetch(apiUrl('/pipelines'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -185,7 +195,7 @@ async function createPipeline(data: PipelineFormData): Promise<Pipeline> {
 }
 
 async function updatePipeline(id: string, data: PipelineFormData): Promise<Pipeline> {
-  const res = await fetch(`${API_BASE}/pipelines/${id}`, {
+  const res = await fetch(apiUrl(`/pipelines/${id}`), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -196,17 +206,17 @@ async function updatePipeline(id: string, data: PipelineFormData): Promise<Pipel
 }
 
 async function deletePipeline_(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/pipelines/${id}`, { method: 'DELETE' });
+  const res = await fetch(apiUrl(`/pipelines/${id}`), { method: 'DELETE' });
   if (!res.ok) throw new Error(`Failed to delete pipeline: ${res.status}`);
 }
 
 async function executePipeline_(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/pipelines/${id}/execute`, { method: 'POST' });
+  const res = await fetch(apiUrl(`/pipelines/${id}/execute`), { method: 'POST' });
   if (!res.ok) throw new Error(`Failed to execute pipeline: ${res.status}`);
 }
 
 async function terminatePipeline_(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/pipelines/${id}/terminate`, { method: 'POST' });
+  const res = await fetch(apiUrl(`/pipelines/${id}/terminate`), { method: 'POST' });
   if (!res.ok) throw new Error(`Failed to terminate pipeline: ${res.status}`);
 }
 
@@ -624,7 +634,7 @@ function Panel() {
     if (isRunning && selectedPipelineId) {
       pollRef.current = setInterval(async () => {
         try {
-          const res = await fetch(`${API_BASE}/pipelines/${selectedPipelineId}`);
+          const res = await fetch(apiUrl(`/pipelines/${selectedPipelineId}`));
           if (!res.ok) throw new Error('Poll failed');
           const json = await res.json();
           const pipeline: Pipeline = json.pipeline || json;

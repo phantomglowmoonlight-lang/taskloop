@@ -12,7 +12,7 @@ import crypto from "node:crypto";
 
 export default function registerPluginUiRoutes(app, ctx) {
   // ── UI 頁面 ──────────────────────────────────────────────────────────
-  app.get("/page", (c) => c.html(renderShell(c, ctx, "page")));
+  app.get("/taskloop", (c) => c.html(renderShell(c, ctx, "page")));
   app.get("/widget", (c) => c.html(renderShell(c, ctx, "widget")));
   app.get("/test", (c) => {
     const testPath = path.join(ctx.pluginDir || "", "assets", "test.html");
@@ -274,6 +274,7 @@ export default function registerPluginUiRoutes(app, ctx) {
 function renderShell(c, ctx, surface) {
   const hanaCss = c.req.query("hana-css") || "";
   const theme = c.req.query("hana-theme") || "inherit";
+  const token = c.req.query("token") || "";
   const base = `/api/plugins/${ctx.pluginId}`;
   const title = "TaskLoop";
 
@@ -284,11 +285,11 @@ function renderShell(c, ctx, surface) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${escapeHtml(title)}</title>
   ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
-  <link rel="stylesheet" href="${base}/assets/panel.css">
+  <link rel="stylesheet" href="${base}/assets/panel.css?token=${escapeAttr(token)}">
 </head>
 <body data-hana-theme="${escapeAttr(theme)}" data-surface="${surface}">
   <div id="root" data-surface="${surface}"></div>
-  <script type="module" src="${base}/assets/panel.js"></script>
+  <script src="${base}/assets/panel.js?token=${escapeAttr(token)}" defer></script>
 </body>
 </html>`;
 }
