@@ -90,6 +90,10 @@ export default function registerPluginUiRoutes(app, ctx) {
         id: crypto.randomUUID(),
         name: body.name,
         description: body.description || "",
+        agentId: body.agentId || 'coder',
+        prompt: body.prompt || '',
+        frameworkIds: body.frameworkIds || [],
+        generatedByAI: !!body.generatedByAI,
         createdAt: now,
         updatedAt: now,
         tasks: (body.tasks || []).map((t, i) => ({
@@ -97,6 +101,9 @@ export default function registerPluginUiRoutes(app, ctx) {
           orderIndex: i,
           name: t.name || `任務 ${i + 1}`,
           prompt: t.prompt || "",
+          agentId: t.agentId || undefined,
+          dependsOn: t.dependsOn || [],
+          type: t.type || "task",
           repeat: t.repeat ?? 1,
           repeatCount: 0,
           conditions: t.conditions || [],
@@ -166,6 +173,9 @@ export default function registerPluginUiRoutes(app, ctx) {
           orderIndex: i,
           name: t.name || `任務 ${i + 1}`,
           prompt: t.prompt || "",
+          agentId: t.agentId || undefined,
+          dependsOn: t.dependsOn || [],
+          type: t.type || "task",
           repeat: t.repeat ?? 1,
           repeatCount: t.repeatCount ?? 0,
           conditions: t.conditions || [],
@@ -179,6 +189,11 @@ export default function registerPluginUiRoutes(app, ctx) {
       if (body.globalConditions !== undefined) {
         pipeline.globalConditions = body.globalConditions;
       }
+
+      if (body.agentId !== undefined) pipeline.agentId = body.agentId;
+      if (body.prompt !== undefined) pipeline.prompt = body.prompt;
+      if (body.frameworkIds !== undefined) pipeline.frameworkIds = body.frameworkIds;
+      if (body.generatedByAI !== undefined) pipeline.generatedByAI = body.generatedByAI;
 
       pipeline.updatedAt = new Date().toISOString();
       writePipelines(pipelines);
@@ -303,6 +318,43 @@ export default function registerPluginUiRoutes(app, ctx) {
       return c.json({ ok: false, error: err.message }, 500);
     }
   });
+
+  // ── AI 生成 API ────────────────────────────────────────────────────────
+
+  /** POST /generate — AI 根據 prompt 產生管線 */
+  app.post("/generate", async (c) => {
+    try {
+      setCorsHeaders(c);
+      const body = await c.req.json();
+      if (!body || !body.prompt) {
+        return c.json({ ok: false, error: "缺少必要欄位：prompt" }, 400);
+      }
+
+      const result = await ctx.bus.request("taskloop:generate-pipeline", {
+        prompt: body.prompt,
+        frameworkIds: body.frameworkIds || [],
+        agentId: body.agentId || "coder",
+      });
+
+      if (result && result.ok) {
+        return c.json({
+          ok: true,
+          name: result.name,
+          description: result.description,
+          tasks: result.tasks,
+          globalConditions: result.globalConditions || [],
+          generatedByAI: true,
+        });
+      }
+
+      return c.json({ ok: false, error: result?.error || "生成失敗", raw: result?.raw }, 500);
+    } catch (err) {
+      setCorsHeaders(c);
+      return c.json({ ok: false, error: err.message }, 500);
+    }
+  });
+
+  app.options("/generate", (c) => { setCorsHeaders(c); return c.body(null, 204); });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

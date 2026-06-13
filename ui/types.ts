@@ -76,6 +76,8 @@ export interface Task {
   name: string;
   prompt: string;
   agentId?: string;
+  dependsOn?: string[];     // 依賴的任務 ID 列表，完成後才執行此任務
+  type?: string;             // 任務類型：write / review / fix / analyze / implement / cycle
   repeat: number;
   repeatCount: number;
   conditions: TaskCondition[];

@@ -40,6 +40,8 @@ interface BlueprintEditorProps {
   onConditionsChange: (conditions: GlobalCondition[]) => void;
   onNameChange: (name: string) => void;
   onPromptChange: (prompt: string) => void;
+  onGenerate?: (prompt: string) => void;
+  generating?: boolean;
 }
 
 let nodeIdCounter = 100;
@@ -116,6 +118,7 @@ export default function BlueprintEditor({
   onTasksChange, onConditionsChange,
   pipelineName, pipelinePrompt,
   onNameChange, onPromptChange,
+  onGenerate, generating,
 }: BlueprintEditorProps) {
   const flowWrapper = useRef<HTMLDivElement>(null);
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
@@ -429,8 +432,12 @@ export default function BlueprintEditor({
             rows={2}
           />
         </div>
-        <button className="bp-btn bp-btn-accent" disabled>
-          ✨ AI 生成
+        <button
+          className="bp-btn bp-btn-accent"
+          onClick={() => onGenerate?.(pipelinePrompt)}
+          disabled={generating || !pipelinePrompt.trim()}
+        >
+          {generating ? '⏳ 生成中...' : '✨ AI 生成'}
         </button>
       </div>
     </div>

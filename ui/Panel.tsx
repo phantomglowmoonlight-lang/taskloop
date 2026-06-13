@@ -264,6 +264,9 @@ function Panel() {
   const [expandedSessionAgent, setExpandedSessionAgent] = useState<string | null>(null);
   const [loadingSessions, setLoadingSessions] = useState(false);
 
+  // AI 生成狀態
+  const [generating, setGenerating] = useState(false);
+
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // 選取的管線物件
@@ -689,6 +692,46 @@ function Panel() {
       } catch (err) {
         console.error(`Failed to load messages for ${agentId}:`, err);
       }
+    }
+  }
+
+  // ─── AI 生成 ────────────────────────────────────────────
+
+  async function handleGenerate(prompt: string) {
+    if (!prompt.trim() || generating) return;
+    setGenerating(true);
+    try {
+      const res = await fetch(apiUrl('/generate'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt,
+          frameworkIds: formData.frameworkIds,
+          agentId: formData.agentId,
+        }),
+      });
+      const json = await res.json();
+      if (json.ok && json.tasks) {
+        setFormData((prev) => ({
+          ...prev,
+          name: json.name || prev.name,
+          description: json.description || prev.description,
+          tasks: json.tasks,
+          globalConditions: json.globalConditions || [],
+        }));
+        // 如果是新增管線模式，自動切到有內容狀態
+        if (json.name) {
+          updateName(json.name);
+        }
+      } else {
+        console.error('AI 生成失敗:', json.error, json.raw);
+        alert(`AI 生成失敗：${json.error || '未知錯誤'}`);
+      }
+    } catch (err) {
+      console.error('AI 生成請求失敗:', err);
+      alert(`請求失敗：${err instanceof Error ? err.message : '未知錯誤'}`);
+    } finally {
+      setGenerating(false);
     }
   }
 
@@ -1474,6 +1517,8 @@ function Panel() {
                   onConditionsChange={(conditions) => setFormData((prev) => ({ ...prev, globalConditions: conditions }))}
                   onNameChange={updateName}
                   onPromptChange={updatePrompt}
+                  onGenerate={handleGenerate}
+                  generating={generating}
                 />
               ) : (
                 renderPipelineEditor()

@@ -207,6 +207,8 @@ function createPipeline(data) {
       name: t.name || `任務 ${i + 1}`,
       prompt: t.prompt || "",
       agentId: t.agentId || undefined,
+      dependsOn: t.dependsOn || [],
+      type: t.type || "task",
       repeat: t.repeat ?? 1,
       repeatCount: 0,
       conditions: t.conditions || [],
@@ -246,6 +248,8 @@ function updatePipeline(id, data) {
       name: t.name || `任務 ${i + 1}`,
       prompt: t.prompt || "",
       agentId: t.agentId || undefined,
+      dependsOn: t.dependsOn || [],
+      type: t.type || "task",
       repeat: t.repeat ?? 1,
       repeatCount: t.repeatCount ?? 0,
       conditions: t.conditions || [],
@@ -551,11 +555,28 @@ async function executePipeline(pipeline, ctx) {
   try {
     const sortedTasks = [...pipeline.tasks].sort((a, b) => a.orderIndex - b.orderIndex);
     let i = 0;
+    const completedIds = new Set();
+
     while (i < sortedTasks.length) {
       if (pipeline.status === "terminated") break;
       if (pipeline.status === "paused") { await waitForResume(pipeline.id); if (pipeline.status === "terminated") break; }
 
       const task = sortedTasks[i];
+
+      // ── 依賴檢查 ──
+      if (task.dependsOn && task.dependsOn.length > 0) {
+        const depsUnmet = task.dependsOn.filter(depId => !completedIds.has(depId));
+        if (depsUnmet.length > 0) {
+          // 有未完成的依賴，跳過此輪
+          i++;
+          if (i >= sortedTasks.length) {
+            // 回頭檢查之前被跳過的
+            i = 0;
+          }
+          continue;
+        }
+      }
+
       pipeline.currentTaskIndex = i;
       pipelineStore.dirty = true; flushPipelines();
 
@@ -599,6 +620,10 @@ async function executePipeline(pipeline, ctx) {
           task.completedAt = nowISO();
           task.repeatCount = runCount + 1;
           pipelineStore.dirty = true; flushPipelines();
+
+          // 註冊完成依賴
+          completedIds.add(task.id);
+          if (task.name) completedIds.add(task.name);
 
           // 記錄 session 活動時間
           if (sessionsStore.sessions[targetAgentId]) {
@@ -852,6 +877,179 @@ const ensureSessionHandler = defineBusHandler({
   },
 });
 
+/**
+ * 處理器：AI 管線生成
+ * prompt + frameworkIds → AI 分析後回傳任務結構
+ */
+const generatePipelineHandler = defineBusHandler({
+  type: "taskloop:generate-pipeline",
+  async handle(payload, ctx) {
+    if (!payload || !payload.prompt) return { ok: false, error: "缺少必要欄位：prompt" };
+
+    const agentId = payload.agentId || "coder";
+    const frameworkIds = payload.frameworkIds || [];
+
+    try {
+      // 1. 確保有 session
+      const sessionInfo = await getAgentSession(ctx, agentId);
+
+      // 2. 建構生成 prompt
+      const genPrompt = buildGenerationPrompt(payload.prompt, frameworkIds);
+
+      // 3. 發送給 AI 並等待回應
+      const response = await sendAndWaitGen(ctx, sessionInfo.sessionPath, genPrompt);
+
+      // 4. 解析 JSON
+      const jsonStr = extractJsonFromResponse(response);
+      if (!jsonStr) {
+        return { ok: false, error: "AI 回傳格式錯誤，無法解析任務結構", raw: response.slice(0, 500) };
+      }
+
+      const parsed = JSON.parse(jsonStr);
+      const tasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
+      const name = parsed.name || payload.prompt.slice(0, 40);
+      const description = parsed.description || payload.prompt;
+
+      // 5. 為每個任務補上必填欄位
+      const now = new Date().toISOString();
+      const enrichedTasks = tasks.map((t, i) => ({
+        id: crypto.randomUUID(),
+        orderIndex: i,
+        name: t.name || `任務 ${i + 1}`,
+        prompt: t.prompt || "",
+        agentId: t.agentId || undefined,
+        dependsOn: t.dependsOn || [],
+        type: t.type || "task",
+        repeat: t.repeat ?? 1,
+        repeatCount: 0,
+        conditions: (t.conditions || []).map(c => ({
+          id: crypto.randomUUID(),
+          type: c.type || "on_success",
+          config: c.config || {},
+          action: c.action || "continue",
+          actionTarget: c.actionTarget || null,
+        })),
+        status: "pending",
+        result: "",
+        startedAt: null,
+        completedAt: null,
+      }));
+
+      return {
+        ok: true,
+        name,
+        description,
+        frameworkIds,
+        generatedByAI: true,
+        tasks: enrichedTasks,
+        globalConditions: parsed.globalConditions || [],
+        raw: response.slice(0, 1000), // debug
+      };
+    } catch (err) {
+      return { ok: false, error: `AI 生成失敗: ${err.message}` };
+    }
+  },
+});
+
+/**
+ * 建構 AI 生成 prompt — 告訴 AI 它在 TaskLoop 中、可用框架、預期輸出格式
+ */
+function buildGenerationPrompt(userGoal, frameworkIds) {
+  const frameworksInfo = frameworkIds.length > 0
+    ? frameworkIds.map(id => {
+        const fw = BUILT_IN_FRAMEWORKS.find(f => f.id === id);
+        return fw ? `【${fw.name}】${fw.description}\n  模板：${fw.promptTemplate.slice(0, 200)}` : `【${id}】（未知框架）`;
+      }).join('\n')
+    : '（未指定框架，請自行判斷）';
+
+  return `【TaskLoop 管線生成任務】
+
+你正在 TaskLoop 系統中，負責根據使用者目標自動產生任務管線。
+
+## 可用 Agent
+- coder（1號程序員）：程式設計、技術實作
+- hanako（木頭助理）：需求分析、任務拆解、協調、文件撰寫
+- hi（2號程序員）：程式設計、技術分析
+- pm（產品經理）：測試、邊界驗證、可用性審查
+
+## 可用框架
+${frameworksInfo}
+
+## 使用者目標
+${userGoal}
+
+## 輸出格式
+請嚴格輸出以下 JSON 格式（不要加入 Markdown 程式碼塊以外的任何文字）：
+
+\`\`\`json
+{
+  "name": "管線名稱",
+  "description": "簡短描述",
+  "tasks": [
+    {
+      "name": "任務名稱",
+      "prompt": "完整任務指示，包含所有細節和步驟",
+      "agentId": "指定執行的agent（coder/hanako/hi/pm，不填則使用預設）",
+      "type": "任務類型：write/review/fix/analyze/implement/cycle",
+      "dependsOn": ["依賴的任務ID（填上一個任務的名稱即可，系統會自動對應）"],
+      "repeat": 1,
+      "conditions": [
+        {
+          "type": "on_success",
+          "action": "continue"
+        }
+      ]
+    }
+  ],
+  "globalConditions": [
+    {
+      "type": "after_tasks_count",
+      "config": { "count": 5 },
+      "action": "pause"
+    }
+  ]
+}
+\`\`\`
+
+請完整思考使用者的目標，拆解為多個任務的管線。
+考慮以下模式：撰寫→審查→修訂→再審查→實施→修 bug→分析... 循環
+每個任務的 prompt 要詳細到 AI 可以直接執行。`;
+}
+
+/**
+ * 向 AI 發送生成請求並等待回應（不含操作指南和編號，這是元操作）
+ */
+function sendAndWaitGen(ctx, sessionPath, prompt) {
+  return new Promise((resolve, reject) => {
+    const timeoutMs = 120000;
+    let settled = false;
+    const timer = setTimeout(() => { if (!settled) { settled = true; unsub(); reject(new Error("AI 生成逾時（2 分鐘）")); } }, timeoutMs);
+    const unsub = subscribeSessionEvents(ctx, sessionPath, (event) => {
+      if (settled) return;
+      const et = event.type || "";
+      if (et === "session:conversation:response" || et === "session:message:response" || et === "session:response" || et.endsWith(":response")) {
+        settled = true; clearTimeout(timer); unsub();
+        resolve(event.text || event.content || event.response || (typeof event.message === "string" ? event.message : "") || JSON.stringify(event));
+      }
+    });
+    sendSessionMessage(ctx, sessionPath, { content: prompt }).catch((err) => { if (!settled) { settled = true; clearTimeout(timer); unsub(); reject(err); } });
+  });
+}
+
+/**
+ * 從 AI 回覆中萃取 JSON 區塊
+ */
+function extractJsonFromResponse(text) {
+  if (!text) return null;
+  // 嘗試匹配 ```json ... ```
+  const match = text.match(/\`\`\`json\s*([\s\S]*?)\s*\`\`\`/);
+  if (match && match[1]) return match[1].trim();
+  // 嘗試匹配 { ... }
+  const braceMatch = text.match(/(\{[\s\S]*\})/);
+  if (braceMatch && braceMatch[1]) return braceMatch[1].trim();
+  return null;
+}
+
 const handlers = [
   createPipelineHandler, getPipelineHandler, listPipelinesHandler,
   updatePipelineHandler, deletePipelineHandler,
@@ -859,6 +1057,7 @@ const handlers = [
   pausePipelineHandler, resumePipelineHandler, pipelineStatusHandler,
   statusHandler,
   listSessionsHandler, readSessionHandler, ensureSessionHandler,
+  generatePipelineHandler,
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════
