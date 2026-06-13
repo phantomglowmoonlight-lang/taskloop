@@ -36,10 +36,12 @@ interface BlueprintEditorProps {
   globalConditions: GlobalCondition[];
   pipelineName: string;
   pipelinePrompt: string;
+  frameworkIds?: string[];
   onTasksChange: (tasks: Task[]) => void;
   onConditionsChange: (conditions: GlobalCondition[]) => void;
   onNameChange: (name: string) => void;
   onPromptChange: (prompt: string) => void;
+  onFrameworkIdsChange?: (ids: string[]) => void;
   onGenerate?: (prompt: string) => void;
   generating?: boolean;
 }
@@ -115,9 +117,11 @@ const nodeTypes = {
 
 export default function BlueprintEditor({
   tasks, globalConditions,
+  frameworkIds = [],
   onTasksChange, onConditionsChange,
   pipelineName, pipelinePrompt,
   onNameChange, onPromptChange,
+  onFrameworkIdsChange,
   onGenerate, generating,
 }: BlueprintEditorProps) {
   const flowWrapper = useRef<HTMLDivElement>(null);
@@ -223,6 +227,25 @@ export default function BlueprintEditor({
     setEdges(initialEdges);
   }, [initialNodes, initialEdges]);
 
+  // 邊線刪除處理：從目標任務的 dependsOn 中移除被刪除的來源
+  const handleEdgesChange = useCallback((changes: any[]) => {
+    for (const change of changes) {
+      if (change.type === 'remove') {
+        const removedEdge = change;
+        const sourceId = typeof removedEdge.source === 'string' ? removedEdge.source : removedEdge.removed?.source;
+        const targetId = typeof removedEdge.target === 'string' ? removedEdge.target : removedEdge.removed?.target;
+        if (sourceId && targetId && sourceId !== 'start' && targetId !== 'end') {
+          onTasksChange(tasks.map(t =>
+            t.id === targetId
+              ? { ...t, dependsOn: (t.dependsOn || []).filter(d => d !== sourceId) }
+              : t,
+          ));
+        }
+      }
+    }
+    onEdgesChange(changes);
+  }, [tasks, onTasksChange, onEdgesChange]);
+
   // 連線處理：更新目標任務的 dependsOn
   const onConnect: OnConnect = useCallback((connection: Connection) => {
     if (!connection.source || !connection.target) return;
@@ -252,15 +275,21 @@ export default function BlueprintEditor({
     setSelectedNode(null);
   }, []);
 
-  // 鍵盤刪除節點 → 實際刪除任務
+  // 鍵盤刪除節點 → 實際刪除任務 + 清理相關邊線與依賴
   const onNodesDelete = useCallback((deletedNodes: Node[]) => {
     const deletedIds = new Set(deletedNodes.map(n => n.id));
-    const remaining = tasks.filter(t => !deletedIds.has(t.id)).map((t, i) => ({ ...t, orderIndex: i }));
+    const remaining = tasks.filter(t => !deletedIds.has(t.id)).map((t, i) => ({
+      ...t,
+      orderIndex: i,
+      // 移除對已刪除任務的 dependsOn 參照
+      dependsOn: (t.dependsOn || []).filter(d => !deletedIds.has(d)),
+    }));
     onTasksChange(remaining);
+    setEdges(eds => eds.filter(e => !deletedIds.has(e.source) && !deletedIds.has(e.target)));
     if (selectedNode && deletedIds.has(selectedNode.id)) {
       setSelectedNode(null);
     }
-  }, [tasks, onTasksChange, selectedNode]);
+  }, [tasks, onTasksChange, selectedNode, setEdges]);
 
   // 新增任務
   const addNewTask = useCallback(() => {
@@ -398,7 +427,7 @@ export default function BlueprintEditor({
             nodes={nodes}
             edges={edges}
             onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
+            onEdgesChange={handleEdgesChange}
             onConnect={onConnect}
             onNodeClick={onNodeClick}
             onPaneClick={onPaneClick}
@@ -485,6 +514,29 @@ export default function BlueprintEditor({
 
       {/* 底部 Prompt 輸入區 */}
       <div className="bp-prompt-bar">
+        <div className="bp-prompt-frameworks">
+          <span className="bp-prompt-label">框架模板</span>
+          <div className="bp-prompt-fw-list">
+            {BUILT_IN_FRAMEWORKS.map(fw => {
+              const selected = frameworkIds.includes(fw.id);
+              return (
+                <button
+                  key={fw.id}
+                  className={`bp-fw-tag ${selected ? 'bp-fw-tag--on' : ''}`}
+                  onClick={() => {
+                    const next = selected
+                      ? frameworkIds.filter(id => id !== fw.id)
+                      : [...frameworkIds, fw.id];
+                    onFrameworkIdsChange?.(next);
+                  }}
+                  title={fw.description}
+                >
+                  {fw.icon} {fw.name}
+                </button>
+              );
+            })}
+          </div>
+        </div>
         <div className="bp-prompt-input-wrapper">
           <span className="bp-prompt-icon">💬</span>
           <textarea

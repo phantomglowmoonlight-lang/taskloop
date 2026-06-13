@@ -127,7 +127,7 @@ function getConditionConfigFields(type: string): { key: string; label: string; t
     case 'after_time':
       return [{ key: 'minutes', label: '執行超過', type: 'number' as const, placeholder: '分鐘', suffix: '分鐘後' }];
     case 'max_failures':
-      return [{ key: 'maxFailures', label: '累計失敗', type: 'number' as const, placeholder: '次數', suffix: '次後' }];
+      return [{ key: 'count', label: '累計失敗', type: 'number' as const, placeholder: '次數', suffix: '次後' }];
     case 'repeat_until':
       return [{ key: 'condition', label: '重複直到', type: 'text' as const, placeholder: '條件描述（例如：輸出包含關鍵字）' }];
     case 'custom':
@@ -284,17 +284,14 @@ function Panel() {
     [pipelines, selectedPipelineId, selectedPipeline],
   );
 
-  // 表單是否被修改過（與所選管線相比）
+  // 表單是否被修改過（與所選管線相比，包括 tasks 和條件）
   const hasChanges = useMemo(() => {
     if (!selectedPipeline) return isNewPipeline;
-    const base = {
-      name: selectedPipeline.name,
-      description: selectedPipeline.description,
-    };
-    return (
-      base.name !== formData.name ||
-      base.description !== formData.description
-    );
+    if (selectedPipeline.name !== formData.name) return true;
+    if (selectedPipeline.description !== formData.description) return true;
+    if (JSON.stringify(selectedPipeline.tasks) !== JSON.stringify(formData.tasks)) return true;
+    if (JSON.stringify(selectedPipeline.globalConditions) !== JSON.stringify(formData.globalConditions)) return true;
+    return false;
   }, [selectedPipeline, formData, isNewPipeline]);
 
   // ─── 初始化 ──────────────────────────────────────────
@@ -515,7 +512,7 @@ function Panel() {
         config = { minutes: 30 };
         break;
       case 'max_failures':
-        config = { maxFailures: 3 };
+        config = { count: 3 };
         break;
       case 'custom':
         config = { condition: '' };
@@ -572,6 +569,7 @@ function Panel() {
         return [...prev, saved];
       });
       setSelectedPipelineId(saved.id);
+      window.__taskloop_lastSavedId = saved.id;
       setIsNewPipeline(false);
       // 同步 formData 以反映已儲存狀態
       setFormData({
@@ -591,18 +589,28 @@ function Panel() {
   // ─── 執行 ──────────────────────────────────────────────
 
   async function handleExecute() {
-    if (!selectedPipelineId) return;
     try {
       setExecError(null);
-      if (hasChanges || isNewPipeline) {
+
+      // 新管線或尚未儲存：先儲存取得 id
+      let pipelineId = selectedPipelineId;
+      if (!pipelineId || isNewPipeline || hasChanges) {
         await handleSave();
+        // handleSave 會 setSelectedPipelineId，但 React state 非同步
+        // 從全域變數或 ref 取最新 id
+        pipelineId = window.__taskloop_lastSavedId || selectedPipelineId;
       }
-      await executePipeline_(selectedPipelineId);
+
+      if (!pipelineId) {
+        setExecError('無法取得管線 ID，請先儲存');
+        return;
+      }
+
+      await executePipeline_(pipelineId);
       setIsRunning(true);
-      // 更新本地管線狀態
       setPipelines((prev) =>
         prev.map((p) =>
-          p.id === selectedPipelineId ? { ...p, status: 'running' as const } : p,
+          p.id === pipelineId ? { ...p, status: 'running' as const } : p,
         ),
       );
     } catch (err) {
@@ -1513,10 +1521,12 @@ function Panel() {
                   globalConditions={formData.globalConditions}
                   pipelineName={formData.name}
                   pipelinePrompt={formData.prompt}
+                  frameworkIds={formData.frameworkIds}
                   onTasksChange={(tasks) => setFormData((prev) => ({ ...prev, tasks }))}
                   onConditionsChange={(conditions) => setFormData((prev) => ({ ...prev, globalConditions: conditions }))}
                   onNameChange={updateName}
                   onPromptChange={updatePrompt}
+                  onFrameworkIdsChange={(ids) => setFormData((prev) => ({ ...prev, frameworkIds: ids }))}
                   onGenerate={handleGenerate}
                   generating={generating}
                 />

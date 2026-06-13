@@ -432,6 +432,82 @@ const SYSTEM_OPERATION_GUIDE = `【系統操作指南 — 請嚴格遵守】
 本次任務編號：`;
 
 /**
+ * 內建框架模板（與前端 templates.ts 同步）
+ * AI 生成管線時用來引導任務結構
+ */
+const BUILT_IN_FRAMEWORKS = [
+  {
+    id: "code-review", name: "Code Review",
+    description: "審查程式碼變更，產出審查意見與改進建議",
+    defaultAgent: "hi", defaultConditions: [],
+    defaultTasks: [
+      { name: "程式碼審查", prompt: "審查以下程式碼變更：\n\n{{prompt}}", agentId: "hi" },
+      { name: "審查報告", prompt: "總結審查結果，列出優點、建議與風險", agentId: "hi" },
+    ],
+    icon: "🔍",
+  },
+  {
+    id: "bug-fix", name: "Bug 修復",
+    description: "診斷並修復程式碼中的錯誤",
+    defaultAgent: "coder", defaultConditions: [],
+    defaultTasks: [
+      { name: "Bug 診斷", prompt: "分析以下 Bug 的根本原因：\n\n{{prompt}}", agentId: "coder" },
+      { name: "Bug 修復", prompt: "根據診斷結果，實作修復方案", agentId: "coder" },
+      { name: "修復驗證", prompt: "驗證修復是否完整，列出可能造成的 side effect", agentId: "hi" },
+    ],
+    icon: "🐛",
+  },
+  {
+    id: "optimize", name: "效能優化",
+    description: "分析並改善系統或程式碼的效能",
+    defaultAgent: "coder", defaultConditions: [],
+    defaultTasks: [
+      { name: "效能分析", prompt: "分析以下項目的效能瓶頸：\n\n{{prompt}}", agentId: "coder" },
+      { name: "優化實作", prompt: "根據分析結果實作優化方案", agentId: "coder" },
+      { name: "效果評估", prompt: "評估優化的效果，列出量化指標", agentId: "hi" },
+    ],
+    icon: "⚡",
+  },
+  {
+    id: "cicd", name: "CI/CD 循環",
+    description: "持續整合/部署管線，含自動化測試與部署",
+    defaultAgent: "coder",
+    defaultConditions: [
+      { type: "max_failures", config: { count: 3 }, action: "terminate", description: "失敗 3 次終止" },
+      { type: "on_complete", config: {}, action: "notify", description: "完成時通知" },
+    ],
+    defaultTasks: [
+      { name: "自動化測試", prompt: "執行測試：\n\n{{prompt}}", agentId: "coder" },
+      { name: "建置檢查", prompt: "執行建置並檢查結果", agentId: "coder" },
+      { name: "部署", prompt: "執行部署流程", agentId: "coder" },
+    ],
+    icon: "🔄",
+  },
+  {
+    id: "test-gen", name: "測試產生器",
+    description: "根據需求自動產生測試案例",
+    defaultAgent: "coder", defaultConditions: [],
+    defaultTasks: [
+      { name: "測試規劃", prompt: "分析以下需求並規劃測試案例：\n\n{{prompt}}", agentId: "coder" },
+      { name: "測試撰寫", prompt: "根據規劃撰寫測試程式碼", agentId: "coder" },
+      { name: "測試驗證", prompt: "執行測試並彙報結果", agentId: "hi" },
+    ],
+    icon: "🧪",
+  },
+  {
+    id: "refactor", name: "重構",
+    description: "在保持行為不變的前提下改善程式碼結構",
+    defaultAgent: "coder", defaultConditions: [],
+    defaultTasks: [
+      { name: "重構分析", prompt: "分析以下程式碼的結構問題：\n\n{{prompt}}", agentId: "hi" },
+      { name: "重構實作", prompt: "根據分析結果進行重構", agentId: "coder" },
+      { name: "重構驗證", prompt: "確認重構後行為未改變，測試通過", agentId: "hi" },
+    ],
+    icon: "🔧",
+  },
+];
+
+/**
  * 驗證 AI 回應中是否包含正確的編號
  * 回傳 { valid, hallucination }
  */
@@ -587,12 +663,12 @@ function hasCycleDependency(tasks) {
 }
 
 /**
- * 修復條件配置 key 不一致
- * 後端某些地方用 `count`，前端某些地方用 `maxFailures`
+ * 統一條件配置 key
+ * 確保 config 中的 key 與後端一致
  */
 function normalizeConditionConfig(config) {
   if (!config) return config;
-  // max_failures: 支援 count 或 maxFailures
+  // 支援舊的 maxFailures 向後相容
   if (config.maxFailures !== undefined && config.count === undefined) {
     config.count = config.maxFailures;
   }
@@ -639,6 +715,9 @@ async function executePipeline(pipeline, ctx) {
     const sortedTasks = [...pipeline.tasks].sort((a, b) => a.orderIndex - b.orderIndex);
     let i = 0;
     const completedIds = new Set();
+    let lastCompletedCount = 0;      // 上一次完整掃描後完成的任務數
+    let stalledCycles = 0;           // 連續無進展的掃描次數
+    const MAX_STALLED_CYCLES = 3;    // 容忍 3 次完整掃描無進展
 
     while (i < sortedTasks.length) {
       if (pipeline.status === "terminated") break;
@@ -654,6 +733,21 @@ async function executePipeline(pipeline, ctx) {
           i++;
           if (i >= sortedTasks.length) {
             // 回頭檢查之前被跳過的
+            // 先檢查死結：一整個掃描循環完成後，如果沒有任何任務推進，→ 死結
+            if (completedIds.size === lastCompletedCount) {
+              stalledCycles++;
+              if (stalledCycles >= MAX_STALLED_CYCLES) {
+                pipeline.status = "terminated";
+                pipeline.completedAt = nowISO();
+                pipelineStore.dirty = true; flushPipelines();
+                broadcastEvent(ctx, pipeline.id, "pipeline_terminated", null, null,
+                  "任務依賴形成死結（依賴不存在或循環），管線已終止");
+                break;
+              }
+            } else {
+              stalledCycles = 0;
+            }
+            lastCompletedCount = completedIds.size;
             i = 0;
           }
           continue;
@@ -1018,6 +1112,12 @@ const generatePipelineHandler = defineBusHandler({
         startedAt: null,
         completedAt: null,
       }));
+
+      // 解析 dependsOn：將名稱轉為對應的任務 ID
+      const nameToId = new Map(enrichedTasks.map(t => [t.name, t.id]));
+      for (const t of enrichedTasks) {
+        t.dependsOn = (t.dependsOn || []).map(dep => nameToId.get(dep) || dep);
+      }
 
       return {
         ok: true,
