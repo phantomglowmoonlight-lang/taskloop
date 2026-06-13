@@ -4,10 +4,11 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@hana/plugin-runtime": "file:vendor/sdk/hana-plugin-runtime-0.0.0.tgz",
-    "@hana/plugin-protocol": "file:vendor/sdk/hana-plugin-protocol-0.0.0.tgz",
-    "@hana/plugin-sdk": "file:vendor/sdk/hana-plugin-sdk-0.0.0.tgz",
     "@hana/plugin-components": "file:vendor/sdk/hana-plugin-components-0.0.0.tgz",
+    "@hana/plugin-protocol": "file:vendor/sdk/hana-plugin-protocol-0.0.0.tgz",
+    "@hana/plugin-runtime": "file:vendor/sdk/hana-plugin-runtime-0.0.0.tgz",
+    "@hana/plugin-sdk": "file:vendor/sdk/hana-plugin-sdk-0.0.0.tgz",
+    "@xyflow/react": "^12.11.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
@@ -16,9 +17,9 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "^5.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
     "typescript": "^5.0.0",
     "vite": "^7.0.0"
   }

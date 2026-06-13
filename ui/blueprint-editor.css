@@ -1,0 +1,482 @@
+/**
+ * TaskLoop 插件 - Blueprint 節點編輯器樣式
+ * Unreal Blueprint 風格
+ */
+
+/* ─── 容器 ────────────────────────────────────────────── */
+
+.bp-wrapper {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ─── 頂部工具列 ──────────────────────────────────────── */
+
+.bp-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--hana-plugin-border, #e0dcd4);
+  background: var(--hana-plugin-bg-card, #fffdf8);
+  flex-shrink: 0;
+}
+
+.bp-name-input {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--hana-plugin-border, #e0dcd4);
+  border-radius: 6px;
+  background: var(--hana-plugin-bg, #f8f5ed);
+  color: var(--hana-plugin-text, #3b3d3f);
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+}
+
+.bp-name-input:focus {
+  outline: none;
+  border-color: var(--hana-plugin-accent, #537d96);
+}
+
+.bp-toolbar-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* ─── 通用按鈕 ──────────────────────────────────────────── */
+
+.bp-btn {
+  padding: 6px 14px;
+  border: 1px solid var(--hana-plugin-border, #e0dcd4);
+  border-radius: 6px;
+  background: var(--hana-plugin-bg, #f8f5ed);
+  color: var(--hana-plugin-text, #3b3d3f);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  white-space: nowrap;
+}
+
+.bp-btn:hover {
+  background: var(--hana-plugin-bg-hover, rgba(0,0,0,0.04));
+  border-color: var(--hana-plugin-accent, #537d96);
+}
+
+.bp-btn-primary {
+  background: var(--hana-plugin-accent, #537d96);
+  color: #fff;
+  border-color: var(--hana-plugin-accent, #537d96);
+}
+
+.bp-btn-primary:hover {
+  background: var(--hana-plugin-accent-hover, #456a80);
+}
+
+.bp-btn-accent {
+  background: linear-gradient(135deg, #537d96, #7e99a8);
+  color: #fff;
+  border: none;
+  padding: 8px 20px;
+  font-weight: 600;
+}
+
+.bp-btn-accent:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.bp-btn-danger {
+  color: var(--hana-plugin-danger, #c0392b);
+  border-color: var(--hana-plugin-danger, #c0392b);
+}
+
+.bp-btn-danger:hover {
+  background: rgba(192, 57, 43, 0.08);
+}
+
+/* ─── 主體區域 ──────────────────────────────────────────── */
+
+.bp-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+}
+
+/* ─── React Flow 區域 ──────────────────────────────────── */
+
+.bp-flow-area {
+  flex: 1;
+  height: 100%;
+  background: var(--hana-plugin-bg, #f8f5ed);
+}
+
+/* ─── 模板面板 ──────────────────────────────────────────── */
+
+.bp-template-panel {
+  width: 240px;
+  min-width: 240px;
+  border-right: 1px solid var(--hana-plugin-border, #e0dcd4);
+  background: var(--hana-plugin-bg-card, #fffdf8);
+  overflow-y: auto;
+  padding: 12px;
+  flex-shrink: 0;
+}
+
+.bp-template-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--hana-plugin-text, #3b3d3f);
+  margin: 0 0 4px;
+}
+
+.bp-template-hint {
+  font-size: 11px;
+  color: var(--hana-plugin-text-muted, #8e9196);
+  margin: 0 0 12px;
+}
+
+.bp-template-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  margin-bottom: 4px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--hana-plugin-text, #3b3d3f);
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  font-size: 13px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.bp-template-item:hover {
+  background: var(--hana-plugin-accent-light, rgba(83,125,150,0.06));
+  border-color: var(--hana-plugin-border, #e0dcd4);
+}
+
+.bp-template-item--cond {
+  cursor: default;
+}
+
+.bp-template-item--cond:hover {
+  background: transparent;
+  border-color: transparent;
+}
+
+.bp-template-icon {
+  font-size: 18px;
+  line-height: 1.2;
+  flex-shrink: 0;
+}
+
+.bp-template-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.bp-template-info strong {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 2px;
+}
+
+.bp-template-desc {
+  display: block;
+  font-size: 11px;
+  color: var(--hana-plugin-text-muted, #8e9196);
+  line-height: 1.4;
+}
+
+/* ─── 屬性面板 ──────────────────────────────────────────── */
+
+.bp-properties-panel {
+  width: 280px;
+  min-width: 280px;
+  border-left: 1px solid var(--hana-plugin-border, #e0dcd4);
+  background: var(--hana-plugin-bg-card, #fffdf8);
+  overflow-y: auto;
+  padding: 16px;
+  flex-shrink: 0;
+}
+
+.bp-props-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--hana-plugin-text, #3b3d3f);
+  margin: 0 0 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--hana-plugin-border, #e0dcd4);
+}
+
+.bp-props-field {
+  margin-bottom: 12px;
+}
+
+.bp-props-field label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--hana-plugin-text-muted, #8e9196);
+  margin-bottom: 4px;
+}
+
+.bp-props-field input,
+.bp-props-field select,
+.bp-props-field textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  border: 1px solid var(--hana-plugin-border, #e0dcd4);
+  border-radius: 6px;
+  background: var(--hana-plugin-bg, #f8f5ed);
+  color: var(--hana-plugin-text, #3b3d3f);
+  font-size: 13px;
+  font-family: inherit;
+  transition: border-color 0.15s ease;
+}
+
+.bp-props-field input:focus,
+.bp-props-field select:focus,
+.bp-props-field textarea:focus {
+  outline: none;
+  border-color: var(--hana-plugin-accent, #537d96);
+}
+
+.bp-props-field textarea {
+  resize: vertical;
+  min-height: 80px;
+}
+
+.bp-props-conditions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bp-props-cond-item {
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--hana-plugin-accent-light, rgba(83,125,150,0.06));
+  font-size: 12px;
+  color: var(--hana-plugin-text-light, #6b6f73);
+}
+
+/* ─── 底部 Prompt 輸入區 ──────────────────────────────── */
+
+.bp-prompt-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--hana-plugin-border, #e0dcd4);
+  background: var(--hana-plugin-bg-card, #fffdf8);
+  flex-shrink: 0;
+}
+
+.bp-prompt-input-wrapper {
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  background: var(--hana-plugin-bg, #f8f5ed);
+  border: 1px solid var(--hana-plugin-border, #e0dcd4);
+  border-radius: 8px;
+  padding: 8px 12px;
+  transition: border-color 0.15s ease;
+}
+
+.bp-prompt-input-wrapper:focus-within {
+  border-color: var(--hana-plugin-accent, #537d96);
+}
+
+.bp-prompt-icon {
+  font-size: 16px;
+  line-height: 1.5;
+  flex-shrink: 0;
+}
+
+.bp-prompt-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--hana-plugin-text, #3b3d3f);
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1.5;
+  resize: none;
+  min-height: 24px;
+}
+
+.bp-prompt-input:focus {
+  outline: none;
+}
+
+.bp-prompt-input::placeholder {
+  color: var(--hana-plugin-text-muted, #8e9196);
+}
+
+/* ═══════════════════════════════════════════════════════
+   React Flow 覆寫
+   ═══════════════════════════════════════════════════════ */
+
+.react-flow__node {
+  cursor: pointer;
+}
+
+.react-flow__edge-path {
+  stroke: var(--hana-plugin-accent, #537d96) !important;
+  stroke-width: 2 !important;
+}
+
+.react-flow__edge.selected .react-flow__edge-path {
+  stroke: var(--hana-plugin-danger, #c0392b) !important;
+}
+
+/* 節點 Base */
+.bp-node {
+  border-radius: 10px;
+  border: 2px solid var(--hana-plugin-border, #d0ccc4);
+  background: var(--hana-plugin-bg-card, #fffdf8);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  min-width: 180px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.bp-node--selected {
+  border-color: var(--hana-plugin-accent, #537d96);
+  box-shadow: 0 0 0 2px rgba(83, 125, 150, 0.2), 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+/* 開始/結束節點 */
+.bp-node--start,
+.bp-node--end {
+  min-width: 80px;
+  text-align: center;
+  padding: 10px 20px;
+  border-radius: 20px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: center;
+}
+
+.bp-node--start {
+  background: linear-gradient(135deg, #27ae60, #2ecc71);
+  border-color: #27ae60;
+  color: #fff;
+}
+
+.bp-node--end {
+  background: linear-gradient(135deg, #e74c3c, #c0392b);
+  border-color: #e74c3c;
+  color: #fff;
+}
+
+.bp-node--start .bp-node-icon,
+.bp-node--end .bp-node-icon {
+  font-size: 14px;
+}
+
+.bp-node--start .bp-node-label,
+.bp-node--end .bp-node-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* 任務節點 */
+.bp-node--task {
+  padding: 0;
+  overflow: hidden;
+}
+
+.bp-node-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--hana-plugin-accent-light, rgba(83,125,150,0.08));
+  border-bottom: 1px solid var(--hana-plugin-border, #e0dcd4);
+}
+
+.bp-node-header-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--hana-plugin-accent, #537d96);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.bp-node-header-name {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bp-node-agent-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--hana-plugin-accent, #537d96);
+  color: #fff;
+  font-weight: 600;
+  flex-shrink: 0;
+  text-transform: uppercase;
+}
+
+.bp-node-body {
+  padding: 8px 12px;
+}
+
+.bp-node-prompt-preview {
+  font-size: 12px;
+  color: var(--hana-plugin-text-light, #6b6f73);
+  line-height: 1.4;
+  min-height: 1.4em;
+}
+
+.bp-node-footer {
+  padding: 4px 12px 8px;
+}
+
+.bp-node-cond-badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(243, 156, 18, 0.12);
+  color: #d68910;
+  font-weight: 500;
+}
+
+/* 縮放控制按鈕 */
+.react-flow__controls-button {
+  background: var(--hana-plugin-bg-card, #fffdf8);
+  border: 1px solid var(--hana-plugin-border, #e0dcd4);
+  color: var(--hana-plugin-text, #3b3d3f);
+  width: 28px;
+  height: 28px;
+}
+
+.react-flow__controls-button:hover {
+  background: var(--hana-plugin-bg, #f8f5ed);
+}
+
+.react-flow__controls-button svg {
+  fill: currentColor;
+}

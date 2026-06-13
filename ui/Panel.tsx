@@ -17,6 +17,7 @@ import {
 } from '@hana/plugin-components';
 import '@hana/plugin-components/styles.css';
 import './panel.css';
+import BlueprintEditor from './BlueprintEditor';
 
 import type {
   Pipeline,
@@ -230,6 +231,9 @@ function Panel() {
   // 主題
   const [themeMode, setThemeMode] = useState<ThemeMode>('inherit');
 
+  // 檢視模式：blueprint | form
+  const [viewMode, setViewMode] = useState<'blueprint' | 'form'>('blueprint');
+
   // 管線列表狀態
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [loading, setLoading] = useState(true);
@@ -337,6 +341,8 @@ function Panel() {
       name: pipeline.name,
       description: pipeline.description,
       agentId: pipeline.agentId || 'coder',
+      prompt: pipeline.prompt || '',
+      frameworkIds: pipeline.frameworkIds || [],
       tasks: pipeline.tasks.map((t) => ({ ...t, conditions: t.conditions.map((c) => ({ ...c })) })),
       globalConditions: pipeline.globalConditions.map((g) => ({ ...g })),
     });
@@ -360,6 +366,8 @@ function Panel() {
       name: '',
       description: '',
       agentId: 'coder',
+      prompt: '',
+      frameworkIds: [],
       tasks: [],
       globalConditions: [],
     });
@@ -378,6 +386,10 @@ function Panel() {
 
   function updateDescription(description: string) {
     setFormData((prev) => ({ ...prev, description }));
+  }
+
+  function updatePrompt(prompt: string) {
+    setFormData((prev) => ({ ...prev, prompt }));
   }
 
   // ─── 任務 CRUD ────────────────────────────────────────
@@ -628,7 +640,7 @@ function Panel() {
       setPipelines((prev) => prev.filter((p) => p.id !== selectedPipelineId));
       setSelectedPipelineId(null);
       setIsNewPipeline(false);
-      setFormData({ name: '', description: '', tasks: [], globalConditions: [] });
+      setFormData({ name: '', description: '', agentId: 'coder', prompt: '', frameworkIds: [], tasks: [], globalConditions: [] });
       setIsRunning(false);
       if (pollRef.current) {
         clearInterval(pollRef.current);
@@ -1386,6 +1398,20 @@ function Panel() {
                 { value: 'custom', label: '自訂' },
               ]}
             />
+            <div className="tl-view-toggle">
+              <button
+                className={`tl-view-btn ${viewMode === 'blueprint' ? 'tl-view-btn--active' : ''}`}
+                onClick={() => setViewMode('blueprint')}
+              >
+                🧊 Blueprint
+              </button>
+              <button
+                className={`tl-view-btn ${viewMode === 'form' ? 'tl-view-btn--active' : ''}`}
+                onClick={() => setViewMode('form')}
+              >
+                📝 表單
+              </button>
+            </div>
             <Button
               variant="ghost"
               onClick={toggleSessions}
@@ -1434,11 +1460,24 @@ function Panel() {
         {/* 主要內容區 */}
         <div className="tl-main">
           {renderSidebar()}
-          <main className="tl-editor">
+          <main className="tl-editor" style={{ padding: viewMode === 'blueprint' ? 0 : undefined, overflow: viewMode === 'blueprint' ? 'hidden' : undefined }}>
             {showSessions ? (
               renderSessionViewer()
             ) : selectedPipelineId || isNewPipeline ? (
-              renderPipelineEditor()
+              viewMode === 'blueprint' ? (
+                <BlueprintEditor
+                  tasks={formData.tasks}
+                  globalConditions={formData.globalConditions}
+                  pipelineName={formData.name}
+                  pipelinePrompt={formData.prompt}
+                  onTasksChange={(tasks) => setFormData((prev) => ({ ...prev, tasks }))}
+                  onConditionsChange={(conditions) => setFormData((prev) => ({ ...prev, globalConditions: conditions }))}
+                  onNameChange={updateName}
+                  onPromptChange={updatePrompt}
+                />
+              ) : (
+                renderPipelineEditor()
+              )
             ) : (
               <EmptyState
                 title="選擇或建立管線"

@@ -15,8 +15,41 @@ export type GlobalConditionType = 'after_tasks_count' | 'after_time' | 'max_fail
 /** 任務條件類型 */
 export type TaskConditionType = 'on_success' | 'on_failure' | 'repeat_until' | 'custom';
 
-/** 條件觸發後的動作 */
-export type ConditionAction = 'pause' | 'jump_to_task' | 'repeat_from' | 'terminate' | 'continue' | 'retry' | 'skip_next' | 'jump_to' | 'repeat';
+/** 條件動作 */
+export type ConditionAction = 'pause' | 'jump_to_task' | 'repeat_from' | 'terminate'
+  | 'continue' | 'retry' | 'skip_next' | 'jump_to' | 'repeat';
+
+/** ─── 框架模板（Framework） ─────────────────────────── */
+
+export interface FrameworkTemplate {
+  id: string;
+  name: string;
+  description: string;
+  category: string;              // 分類：code-review / bug-fix / optimize / custom
+  promptTemplate: string;        // 指令模板，含 {{placeholder}}
+  expectedInputs: string[];      // 預期輸入（如 filePath, branch）
+  defaultConditions: string[];   // 預設套用的條件模板 ID
+  icon?: string;                 // 圖示 emoji
+}
+
+/** ─── 條件模板（Condition Template） ─────────────────── */
+
+export interface ConditionTemplate {
+  id: string;
+  name: string;
+  description: string;
+  type: 'cycle' | 'time' | 'count' | 'result' | 'custom';
+  configFields: {
+    key: string;
+    label: string;
+    type: 'number' | 'text' | 'select';
+    options?: { value: string; label: string }[];
+    defaultValue?: string | number;
+    placeholder?: string;
+  }[];
+  availableActions: string[];
+  icon?: string;
+}
 
 /** 全局條件 */
 export interface GlobalCondition {
@@ -42,7 +75,7 @@ export interface Task {
   orderIndex: number;
   name: string;
   prompt: string;
-  agentId?: string;        // 指定執行此任務的 Agent，不填則用管線預設
+  agentId?: string;
   repeat: number;
   repeatCount: number;
   conditions: TaskCondition[];
@@ -57,7 +90,11 @@ export interface Pipeline {
   id: string;
   name: string;
   description: string;
-  agentId: string;         // 主負責 Agent（預設 "coder"）
+  agentId: string;
+  // AI 生成模式
+  prompt: string;                // 高層級目標 prompt
+  frameworkIds: string[];        // 選用的框架 ID 列表
+  generatedByAI: boolean;        // 是否由 AI 自動生成
   createdAt: string;
   updatedAt: string;
   tasks: Task[];
@@ -68,35 +105,18 @@ export interface Pipeline {
   completedAt: string | null;
 }
 
-/** 建立管線的輸入 */
-export interface CreatePipelineInput {
-  name: string;
-  description?: string;
-  agentId?: string;
-  tasks?: Omit<Task, 'id' | 'status' | 'result' | 'startedAt' | 'completedAt' | 'repeatCount'>[];
-  globalConditions?: GlobalCondition[];
-}
-
-/** 管線執行狀態（透過 EventBus 推送給 UI） */
-export interface PipelineExecutionEvent {
-  type: 'task_started' | 'task_completed' | 'task_failed' | 'pipeline_completed' | 'pipeline_terminated' | 'condition_triggered';
-  pipelineId: string;
-  taskId?: string;
-  taskIndex?: number;
-  message?: string;
-  timestamp: string;
-}
-
-/** UI 專用：管線表單資料 */
+/** UI 表單資料 */
 export interface PipelineFormData {
   name: string;
   description: string;
   agentId: string;
+  prompt: string;
+  frameworkIds: string[];
   tasks: Task[];
   globalConditions: GlobalCondition[];
 }
 
-/** Session 訊息（供前端顯示） */
+/** Session 訊息 */
 export interface SessionMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
@@ -110,3 +130,32 @@ export interface AgentSessionInfo {
   lastActivity: string | null;
   messageCount: number;
 }
+
+/** ─── React Flow 節點資料 ───────────────────────────── */
+
+export type NodeType = 'taskNode' | 'startNode' | 'endNode' | 'branchNode' | 'frameworkNode';
+
+export interface TaskNodeData {
+  type: 'taskNode';
+  task: Task;
+  onChange: (taskId: string, field: string, value: unknown) => void;
+  onDelete: (taskId: string) => void;
+}
+
+export interface StartNodeData {
+  type: 'startNode';
+  label: string;
+}
+
+export interface EndNodeData {
+  type: 'endNode';
+  label: string;
+}
+
+export interface BranchNodeData {
+  type: 'branchNode';
+  condition: GlobalCondition;
+  onChange: (cond: GlobalCondition) => void;
+}
+
+export type CustomNodeData = TaskNodeData | StartNodeData | EndNodeData | BranchNodeData;
