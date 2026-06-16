@@ -958,7 +958,7 @@ const startPipelineHandler = defineBusHandler({
 
     const pipeline = getPipeline(payload.id);
     if (!pipeline) return { ok: false, error: "管線不存在" };
-    if (pipeline.status === "running") return { ok: false, error: "管線正在執行中" };
+    if (pipeline.status === "running" || pipeline.status === "paused") return { ok: false, error: "管線正在執行中或已暫停，請先終止再重新執行" };
 
     if (executions.has(pipeline.id)) {
       const existing = executions.get(pipeline.id);
