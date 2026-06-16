@@ -239,17 +239,14 @@ function updatePipeline(id, data) {
   const pipeline = getPipeline(id);
   if (!pipeline) return null;
 
-  // 深拷貝避免就地突變
-  const clone = JSON.parse(JSON.stringify(pipeline));
-
-  if (data.name !== undefined) clone.name = data.name;
-  if (data.description !== undefined) clone.description = data.description;
-  if (data.agentId !== undefined) clone.agentId = data.agentId;
-  if (data.prompt !== undefined) clone.prompt = data.prompt;
-  if (data.frameworkIds !== undefined) clone.frameworkIds = data.frameworkIds;
+  if (data.name !== undefined) pipeline.name = data.name;
+  if (data.description !== undefined) pipeline.description = data.description;
+  if (data.agentId !== undefined) pipeline.agentId = data.agentId;
+  if (data.prompt !== undefined) pipeline.prompt = data.prompt;
+  if (data.frameworkIds !== undefined) pipeline.frameworkIds = data.frameworkIds;
 
   if (data.tasks !== undefined) {
-    clone.tasks = data.tasks.map((t, i) => ({
+    pipeline.tasks = data.tasks.map((t, i) => ({
       id: t.id || uid(),
       orderIndex: i,
       name: t.name || `任務 ${i + 1}`,
@@ -268,17 +265,13 @@ function updatePipeline(id, data) {
   }
 
   if (data.globalConditions !== undefined) {
-    clone.globalConditions = data.globalConditions;
+    pipeline.globalConditions = data.globalConditions;
   }
 
-  clone.updatedAt = nowISO();
-
-  // 替換原 pipelineStore 中的物件
-  const idx = pipelineStore.pipelines.findIndex(p => p.id === id);
-  if (idx !== -1) pipelineStore.pipelines[idx] = clone;
+  pipeline.updatedAt = nowISO();
   pipelineStore.dirty = true;
   flushPipelines();
-  return clone;
+  return pipeline;
 }
 
 function deletePipeline(id) {
@@ -448,7 +441,7 @@ const SYSTEM_OPERATION_GUIDE = `【系統操作指南 — 請嚴格遵守】
  */
 const BUILT_IN_FRAMEWORKS = [
   {
-    id: "code-review", name: "Code Review",
+    id: "fw-code-review", name: "Code Review",
     description: "審查程式碼變更，產出審查意見與改進建議",
     defaultAgent: "hi", defaultConditions: [],
     defaultTasks: [
@@ -458,7 +451,7 @@ const BUILT_IN_FRAMEWORKS = [
     icon: "🔍",
   },
   {
-    id: "bug-fix", name: "Bug 修復",
+    id: "fw-bug-fix", name: "Bug 修復",
     description: "診斷並修復程式碼中的錯誤",
     defaultAgent: "coder", defaultConditions: [],
     defaultTasks: [
@@ -469,7 +462,7 @@ const BUILT_IN_FRAMEWORKS = [
     icon: "🐛",
   },
   {
-    id: "optimize", name: "效能優化",
+    id: "fw-optimize", name: "效能優化",
     description: "分析並改善系統或程式碼的效能",
     defaultAgent: "coder", defaultConditions: [],
     defaultTasks: [
@@ -480,7 +473,7 @@ const BUILT_IN_FRAMEWORKS = [
     icon: "⚡",
   },
   {
-    id: "cicd", name: "CI/CD 循環",
+    id: "fw-ci-workflow", name: "CI/CD 循環",
     description: "持續整合/部署管線，含自動化測試與部署",
     defaultAgent: "coder",
     defaultConditions: [
@@ -495,7 +488,7 @@ const BUILT_IN_FRAMEWORKS = [
     icon: "🔄",
   },
   {
-    id: "test-gen", name: "測試產生器",
+    id: "fw-test-gen", name: "測試產生器",
     description: "根據需求自動產生測試案例",
     defaultAgent: "coder", defaultConditions: [],
     defaultTasks: [
@@ -506,7 +499,7 @@ const BUILT_IN_FRAMEWORKS = [
     icon: "🧪",
   },
   {
-    id: "refactor", name: "重構",
+    id: "fw-refactor", name: "重構",
     description: "在保持行為不變的前提下改善程式碼結構",
     defaultAgent: "coder", defaultConditions: [],
     defaultTasks: [
@@ -849,14 +842,17 @@ async function executePipeline(pipeline, ctx) {
         }
       }
       if (checkGlobalConditions(pipeline, ctx)) {
-        // pause 動作：讓 loop 回到開頭的暫停檢查，而非直接中斷
-        if (pipeline.status === "paused") continue;
+        // pause：i++ 再 continue，避免恢復後重複執行已完成任務
+        if (pipeline.status === "paused") { i++; continue; }
+        // jump_to_task / repeat_from：currentTaskIndex 已被更新，直接跳到目標
+        if (pipeline.currentTaskIndex >= 0 && pipeline.currentTaskIndex < sortedTasks.length && pipeline.currentTaskIndex !== i) {
+          i = pipeline.currentTaskIndex;
+          continue;
+        }
+        // terminate：中斷
         break;
       }
       i++;
-      if (pipeline.currentTaskIndex >= 0 && pipeline.currentTaskIndex !== i && pipeline.currentTaskIndex < sortedTasks.length) {
-        i = pipeline.currentTaskIndex;
-      }
     }
 
     if (pipeline.status === "running") {
@@ -996,6 +992,9 @@ const pausePipelineHandler = defineBusHandler({
     if (!pipeline) return { ok: false, error: "管線不存在" };
     if (pipeline.status !== "running") return { ok: false, error: "管線不在執行中狀態" };
     pipeline.status = "paused"; pipelineStore.dirty = true; flushPipelines();
+    // 中斷進行中的 AI 請求
+    const execCtx = executions.get(pipeline.id);
+    if (execCtx?.abortCtrl) execCtx.abortCtrl.abort();
     return { ok: true, message: "管線已暫停" };
   },
 });
@@ -1159,7 +1158,7 @@ function buildGenerationPrompt(userGoal, frameworkIds) {
   const frameworksInfo = frameworkIds.length > 0
     ? frameworkIds.map(id => {
         const fw = BUILT_IN_FRAMEWORKS.find(f => f.id === id);
-        return fw ? `【${fw.name}】${fw.description}\n  模板：${fw.promptTemplate.slice(0, 200)}` : `【${id}】（未知框架）`;
+        return fw ? `【${fw.name}】${fw.description}\n  預設任務：${(fw.defaultTasks || []).map(t => t.name).join(' → ')}` : `【${id}】（未知框架）`;
       }).join('\n')
     : '（未指定框架，請自行判斷）';
 

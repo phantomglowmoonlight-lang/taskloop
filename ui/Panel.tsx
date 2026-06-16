@@ -248,7 +248,7 @@ function Panel() {
   const [formData, setFormData] = useState<PipelineFormData>({
     name: '',
     description: '',
-    agentId: undefined,
+    agentId: 'coder',
     prompt: '',
     frameworkIds: [],
     tasks: [],
