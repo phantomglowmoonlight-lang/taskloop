@@ -548,6 +548,8 @@ function Panel() {
         name: formData.name || '未命名管線',
         description: formData.description,
         agentId: formData.agentId,
+        prompt: formData.prompt,
+        frameworkIds: formData.frameworkIds,
         tasks: formData.tasks,
         globalConditions: formData.globalConditions,
       };
@@ -583,6 +585,7 @@ function Panel() {
         globalConditions: saved.globalConditions.map((g) => ({ ...g })),
       }));
       setSaveStatus('success');
+      setExecError(null);
       setTimeout(() => setSaveStatus('idle'), 2000);
     } catch (err) {
       setSaveStatus('error');

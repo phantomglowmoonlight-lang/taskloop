@@ -4,7 +4,7 @@
  * 使用 React Flow (@xyflow/react)
  */
 
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ReactFlow,
   Background,
@@ -244,11 +244,11 @@ export default function BlueprintEditor({
     onEdgesChange(changes);
   }, [tasks, onTasksChange, onEdgesChange]);
 
-  // 同步外部變更
-  useMemo(() => {
+  // 同步外部 tasks 變更到 React Flow 內部狀態（useEffect 而非 useMemo）
+  useEffect(() => {
     setNodes(initialNodes);
     setEdges(initialEdges);
-  }, [initialNodes, initialEdges]);
+  }, [initialNodes, initialEdges, setNodes, setEdges]);
 
   // 連線處理：更新目標任務的 dependsOn
   const onConnect: OnConnect = useCallback((connection: Connection) => {
@@ -325,14 +325,19 @@ export default function BlueprintEditor({
       prompt: fw.promptTemplate,
       repeat: 1,
       repeatCount: 0,
-      conditions: fw.defaultConditions.map((condId, i) => {
+      conditions: (fw.defaultConditions || []).map((condId, i) => {
         const cond = BUILT_IN_CONDITIONS.find(c => c.id === condId);
         if (!cond) return null;
+        // 正確映射 conditions：根據模板的 configFields 建立預設 config
+        const condConfig: Record<string, unknown> = {};
+        for (const field of (cond.configFields || [])) {
+          if (field.default !== undefined) condConfig[field.key] = field.default;
+        }
         return {
           id: `${nextNodeId()}_cond_${i}`,
-          type: (cond.type === 'cycle' || cond.type === 'count') ? 'on_success' as const : 'on_failure' as const,
-          config: {},
-          action: (cond.availableActions[0] === 'retry' ? 'retry' : cond.availableActions[0] === 'git_push' ? 'continue' : 'continue') as any,
+          type: cond.type as any,
+          config: condConfig,
+          action: cond.availableActions[0] || 'continue',
           actionTarget: null,
         };
       }).filter(Boolean) as any[],
@@ -345,14 +350,19 @@ export default function BlueprintEditor({
     setShowTemplates(false);
   }, [tasks, onTasksChange]);
 
-  // 刪除選取的任務
+  // 刪除選取的任務（含清理 edges + dependsOn）
   const deleteSelectedTask = useCallback(() => {
     if (!selectedNode || selectedNode.type !== 'taskNode') return;
-    const taskId = selectedNode.id;
-    const filtered = tasks.filter(t => t.id !== taskId).map((t, i) => ({ ...t, orderIndex: i }));
+    const deletedId = selectedNode.id;
+    const filtered = tasks.filter(t => t.id !== deletedId).map((t, i) => ({
+      ...t,
+      orderIndex: i,
+      dependsOn: (t.dependsOn || []).filter(d => d !== deletedId),
+    }));
     onTasksChange(filtered);
+    setEdges(eds => eds.filter(e => e.source !== deletedId && e.target !== deletedId));
     setSelectedNode(null);
-  }, [selectedNode, tasks, onTasksChange]);
+  }, [selectedNode, tasks, onTasksChange, setEdges]);
 
   // ─── 側邊選取任務的屬性編輯器 ──────────────────────────
 
