@@ -243,7 +243,7 @@ function renderShell(c, ctx, surface) {
   ${hanaCss ? `<link rel="stylesheet" href="${escapeAttr(hanaCss)}">` : ""}
   <link rel="stylesheet" href="${base}/assets/panel.css?token=${escapeAttr(token)}">
 </head>
-<body data-hana-theme="${escapeAttr(theme)}" data-surface="${surface}">
+<body data-hana-theme="${escapeAttr(theme)}" data-surface="${surface}" data-token="${escapeAttr(token)}">
   <div id="root" data-surface="${surface}"></div>
   <script src="${base}/assets/panel.js?token=${escapeAttr(token)}" defer></script>
 </body>

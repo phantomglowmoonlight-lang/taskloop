@@ -37,7 +37,10 @@ const API_BASE = `${window.location.origin}/api/plugins/taskloop`;
 const POLL_INTERVAL_MS = 2000;
 
 // 從頁面 URL 提取 token（HanaAgent 注入的認證參數）
-const TOKEN = new URLSearchParams(window.location.search).get('token') || '';
+// 優先從 body data-token 屬性讀取，其次從 URL query string
+const TOKEN =
+  (typeof document !== 'undefined' && document.body?.dataset?.token) ||
+  new URLSearchParams(window.location.search).get('token') || '';
 
 /** 建構 API URL，自動附加 token 查詢參數 */
 function apiUrl(path: string): string {
