@@ -118,11 +118,7 @@ export default function registerPluginUiRoutes(app, ctx) {
     try {
       setCorsHeaders(c);
       const id = c.req.param("id");
-      const agentId = c.get("agentId");
-      const result = await ctx.bus.request("taskloop:start-pipeline", {
-        id,
-        agentId: agentId || undefined,
-      });
+      const result = await ctx.bus.request("taskloop:start-pipeline", { id });
       if (result && result.ok) {
         return c.json({ ok: true, message: "管線已開始執行", pipeline: result.pipeline });
       }

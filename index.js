@@ -836,7 +836,7 @@ async function executePipeline(pipeline, ctx) {
           if (failureCond) {
             const result = checkTaskCondition(failureCond, pipeline, sortedTasks, task, i, ctx);
             if (result.action === "terminate") break;
-            if (result.action === "retry") continue;
+            if (result.action === "retry") { runCount = 0; continue; }
           }
           runCount = maxRepeats;
         }
