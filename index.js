@@ -785,7 +785,7 @@ async function executePipeline(pipeline, ctx) {
       pipeline.currentTaskIndex = i;
       pipelineStore.dirty = true; flushPipelines();
 
-      if (task.status === "skipped") { i++; continue; }
+      if (task.status === "skipped" || task.status === "completed") { i++; continue; }
 
       // 決定此任務要發送給哪個 Agent
       const targetAgentId = task.agentId || pipeline.agentId || "coder";
@@ -867,8 +867,12 @@ async function executePipeline(pipeline, ctx) {
         }
       }
       if (checkGlobalConditions(pipeline, ctx)) {
-        // pause：i++ 再 continue，避免恢復後重複執行已完成任務
-        if (pipeline.status === "paused") { i++; continue; }
+        // pause：i++ 再 continue，回到開頭 waitForResume
+        if (pipeline.status === "paused") {
+          i++;
+          if (i >= sortedTasks.length) i = 0;
+          continue;
+        }
         // jump_to_task / repeat_from：currentTaskIndex 已被更新，直接跳到目標
         if (pipeline.currentTaskIndex >= 0 && pipeline.currentTaskIndex < sortedTasks.length && pipeline.currentTaskIndex !== i) {
           i = pipeline.currentTaskIndex;
