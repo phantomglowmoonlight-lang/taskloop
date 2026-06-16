@@ -189,18 +189,16 @@ export default function BlueprintEditor({
           }
         }
       }
-      // 找出沒有被任何任務 dependsOn 的任務，從 start 連到它們
+      // 找出沒有被任何任務 dependsOn 的任務（entry），從 start 連到它們
       const targeted = new Set(tasks.flatMap(t => t.dependsOn || []));
-      const unordered = tasks.filter(t => !targeted.has(t.id) && !targeted.has(t.name));
-      for (const t of unordered) {
+      const entryTasks = tasks.filter(t => !(t.dependsOn && t.dependsOn.length > 0));
+      for (const t of entryTasks) {
         edges.push({ id: `e-start-${t.id}`, source: 'start', target: t.id, type: 'smoothstep', animated: true });
       }
-      // 找出沒有 dependsOn 其他任務的任務，連到 end
-      const hasOutgoing = new Set(tasks.filter(t => t.dependsOn && t.dependsOn.length > 0).map(t => t.id));
-      for (const t of tasks) {
-        if (!hasOutgoing.has(t.id)) {
-          edges.push({ id: `e-${t.id}-end`, source: t.id, target: 'end', type: 'smoothstep', animated: true });
-        }
+      // 找出沒有出現在任何 dependsOn 參照中的任務（leaf），連到 end
+      const leafTasks = tasks.filter(t => !targeted.has(t.id) && !targeted.has(t.name));
+      for (const t of leafTasks) {
+        edges.push({ id: `e-${t.id}-end`, source: t.id, target: 'end', type: 'smoothstep', animated: true });
       }
     } else {
       // 無 dependsOn：按 orderIndex 線性連線
@@ -222,6 +220,8 @@ export default function BlueprintEditor({
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
   const edgesRef = useRef(edges);
   edgesRef.current = edges;
+  const tasksRef = useRef(tasks);
+  tasksRef.current = tasks;
   // handleEdgesChange 需要透過 ref 存取當前 edges，避免 stale closure
   const handleEdgesChange = useCallback((changes: any[]) => {
     const currentEdges = edgesRef.current;
@@ -232,11 +232,15 @@ export default function BlueprintEditor({
           const sourceId = removedEdge.source;
           const targetId = removedEdge.target;
           if (sourceId && targetId && sourceId !== 'start' && targetId !== 'end') {
-            onTasksChange(tasks.map(t =>
-              t.id === targetId
-                ? { ...t, dependsOn: (t.dependsOn || []).filter(d => d !== sourceId) }
-                : t,
-            ));
+            const currentTasks = tasksRef.current;
+            const targetExists = currentTasks.some(t => t.id === targetId);
+            if (targetExists) {
+              onTasksChange(currentTasks.map(t =>
+                t.id === targetId
+                  ? { ...t, dependsOn: (t.dependsOn || []).filter(d => d !== sourceId) }
+                  : t,
+              ));
+            }
           }
         }
       }
@@ -331,11 +335,19 @@ export default function BlueprintEditor({
         // 正確映射 conditions：根據模板的 configFields 建立預設 config
         const condConfig: Record<string, unknown> = {};
         for (const field of (cond.configFields || [])) {
-          if (field.default !== undefined) condConfig[field.key] = field.default;
+          if (field.defaultValue !== undefined) condConfig[field.key] = field.defaultValue;
         }
+        // 將 ConditionTemplate.type 映射為 TaskConditionType
+        const condTypeMap: Record<string, string> = {
+          cycle: 'repeat_until',
+          time: 'on_failure',
+          count: 'on_failure',
+          result: 'on_success',
+          custom: 'custom',
+        };
         return {
           id: `${nextNodeId()}_cond_${i}`,
-          type: cond.type as any,
+          type: (condTypeMap[cond.type] || 'on_success') as any,
           config: condConfig,
           action: cond.availableActions[0] || 'continue',
           actionTarget: null,

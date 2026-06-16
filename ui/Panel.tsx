@@ -590,6 +590,7 @@ function Panel() {
     } catch (err) {
       setSaveStatus('error');
       setExecError(err instanceof Error ? err.message : '儲存失敗');
+      throw err; // 讓 handleExecute 知道儲存失敗
     }
   }
 
