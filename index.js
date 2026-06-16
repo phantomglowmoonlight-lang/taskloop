@@ -194,6 +194,38 @@ function nowISO() { return new Date().toISOString(); }
 
 function createPipeline(data) {
   const ts = nowISO();
+  // 先為每個任務產生新 ID，再用於 dependsOn 重映射
+  const tasksWithOldIds = (data.tasks || []).map((t, i) => ({
+    oldId: t.id,
+    id: uid(),
+    orderIndex: i,
+    name: t.name || `任務 ${i + 1}`,
+    prompt: t.prompt || "",
+    agentId: t.agentId || undefined,
+    dependsOn: t.dependsOn || [],
+    type: t.type || "task",
+    repeat: t.repeat ?? 1,
+    repeatCount: 0,
+    conditions: t.conditions || [],
+    status: "pending",
+    result: "",
+    startedAt: null,
+    completedAt: null,
+  }));
+
+  // 建立 oldId→newId 映射
+  const idMap = new Map(tasksWithOldIds.map(t => [t.oldId, t.id]));
+  // 同時用名稱映射（AI 生成可能用名稱當 dependsOn）
+  for (const t of tasksWithOldIds) {
+    if (t.name) idMap.set(t.name, t.id);
+  }
+
+  // 重映射 dependsOn + 清除 oldId
+  const tasks = tasksWithOldIds.map(({ oldId, ...t }) => ({
+    ...t,
+    dependsOn: t.dependsOn.map(dep => idMap.get(dep) || dep),
+  }));
+
   const pipeline = {
     id: uid(),
     name: data.name || "未命名管線",
@@ -203,22 +235,7 @@ function createPipeline(data) {
     frameworkIds: data.frameworkIds || [],
     createdAt: ts,
     updatedAt: ts,
-    tasks: (data.tasks || []).map((t, i) => ({
-      id: uid(),
-      orderIndex: i,
-      name: t.name || `任務 ${i + 1}`,
-      prompt: t.prompt || "",
-      agentId: t.agentId || undefined,
-      dependsOn: t.dependsOn || [],
-      type: t.type || "task",
-      repeat: t.repeat ?? 1,
-      repeatCount: 0,
-      conditions: t.conditions || [],
-      status: "pending",
-      result: "",
-      startedAt: null,
-      completedAt: null,
-    })),
+    tasks,
     globalConditions: data.globalConditions || [],
     status: "idle",
     currentTaskIndex: -1,
@@ -246,7 +263,9 @@ function updatePipeline(id, data) {
   if (data.frameworkIds !== undefined) pipeline.frameworkIds = data.frameworkIds;
 
   if (data.tasks !== undefined) {
-    pipeline.tasks = data.tasks.map((t, i) => ({
+    // 先為任務 ID 建立映射
+    const newTasks = data.tasks.map((t, i) => ({
+      oldId: t.id,
       id: t.id || uid(),
       orderIndex: i,
       name: t.name || `任務 ${i + 1}`,
@@ -261,6 +280,12 @@ function updatePipeline(id, data) {
       result: t.result || "",
       startedAt: t.startedAt || null,
       completedAt: t.completedAt || null,
+    }));
+    const idMap = new Map(newTasks.map(t => [t.oldId, t.id]));
+    for (const t of newTasks) { if (t.name) idMap.set(t.name, t.id); }
+    pipeline.tasks = newTasks.map(({ oldId, ...t }) => ({
+      ...t,
+      dependsOn: t.dependsOn.map(dep => idMap.get(dep) || dep),
     }));
   }
 
